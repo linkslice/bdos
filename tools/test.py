@@ -71,8 +71,9 @@ class VM:
     def text(self, start=0):
         return self.log[start:].decode(errors="replace").replace("\r", "")
 
-    def wait_for(self, token, timeout=60):
-        start = len(self.log)
+    def wait_for(self, token, timeout=60, start=None):
+        if start is None:
+            start = len(self.log)
         end = time.time() + timeout
         while time.time() < end:
             if token in self.text(start):
@@ -302,7 +303,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.2", 10)
+    vm.wait_for("bdos version 0.2", 10, start)
 
 
 def t_screens(vm):

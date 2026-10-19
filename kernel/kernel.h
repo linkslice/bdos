@@ -10,7 +10,7 @@
 
 #define BDOS_NAME	"bdos"
 #define BDOS_LONGNAME	"Bryan Disk Operating System"
-#define BDOS_VERSION	"0.2"
+#define BDOS_VERSION	"0.3"
 
 #define NELEM(a)	(sizeof(a) / sizeof((a)[0]))
 #define MIN(a, b)	((a) < (b) ? (a) : (b))

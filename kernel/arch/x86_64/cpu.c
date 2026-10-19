@@ -258,10 +258,28 @@ static void pit_init(void)
 	irq_register(IRQ_TIMER, timer_irq);
 }
 
+/* SSE for the language interpreters (the rest of the kernel never uses it) */
+static void fpu_init(void)
+{
+	uint64_t cr0, cr4;
+	__asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+	cr0 &= ~(1ULL << 2);	/* EM off: no x87 emulation */
+	cr0 |= 1ULL << 1;	/* MP on */
+	cr0 &= ~(1ULL << 3);	/* TS off */
+	__asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+	cr4 |= (1ULL << 9) | (1ULL << 10);	/* OSFXSR, OSXMMEXCPT */
+	__asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+	__asm__ volatile("fninit");
+	uint32_t mxcsr = 0x1F80;	/* all exceptions masked, round to nearest */
+	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+}
+
 void arch_init(const void *bootinfo_ptr)
 {
 	const struct bdos_bootinfo *bi = bootinfo_ptr;
 	gdt_init();
+	fpu_init();
 	for (int i = 0; i < 48; i++)
 		idt_set(i, isr_table[i]);
 	idt_set(255, isr_spurious);
@@ -279,8 +297,9 @@ extern void arch_task_trampoline(void);
 
 void arch_task_setup(struct arch_context *ctx, void *stack_top, void (*entry)(void))
 {
+	/* After arch_switch's ret, rsp is 16-aligned in the trampoline, so its
+	 * call leaves rsp = 8 mod 16 at entry, as the SysV ABI requires. */
 	uint64_t *sp = (uint64_t *)((uint64_t)stack_top & ~15ULL);
-	*--sp = 0;				/* alignment pad */
 	*--sp = (uint64_t)arch_task_trampoline;	/* return address */
 	*--sp = 0;				/* rbp */
 	*--sp = 0;				/* rbx */

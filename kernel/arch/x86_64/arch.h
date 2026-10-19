@@ -104,6 +104,13 @@ void arch_task_setup(struct arch_context *ctx, void *stack_top,
 _Noreturn void arch_reboot(void);
 void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s);
 
+/* Non-local exits for the language interpreters */
+struct arch_jmpbuf {
+	uint64_t regs[8];
+};
+int arch_setjmp(struct arch_jmpbuf *jb) __attribute__((returns_twice));
+_Noreturn void arch_longjmp(struct arch_jmpbuf *jb, int v);
+
 /* Interrupt lines (legacy PC numbering on x86) */
 #define IRQ_TIMER	0
 #define IRQ_KBD		1

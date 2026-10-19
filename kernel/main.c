@@ -1,6 +1,7 @@
 /* main.c - bdos kernel entry */
 #include "kernel.h"
 #include "vfs.h"
+#include "sysapi.h"
 
 const struct bdos_bootinfo *bootinfo;
 extern char __bss_start[], __bss_end[];
@@ -49,6 +50,7 @@ static void selftest(void)
 
 void kernel_late_init(void)
 {
+	sysapi_init();
 	storage_init();
 }
 

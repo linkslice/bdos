@@ -18,15 +18,19 @@ LOADER_CFLAGS := -target x86_64-unknown-windows -ffreestanding -fshort-wchar \
 	-mno-red-zone -fno-stack-protector -mno-stack-arg-probe \
 	-O2 -Wall -Wextra -std=c11 -Iinclude
 
-KERNEL_CFLAGS := -target x86_64-unknown-none-elf -ffreestanding -fno-pic -fno-pie \
-	-mno-red-zone -mgeneral-regs-only -fno-stack-protector -fno-builtin \
+KERNEL_CFLAGS_BASE := -target x86_64-unknown-none-elf -ffreestanding -fno-pic -fno-pie \
+	-mno-red-zone -fno-stack-protector -fno-builtin \
 	-mcmodel=small -O2 -g -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter -std=gnu11 \
 	-I$(B) -Iinclude -Ikernel/arch/$(ARCH) -DBDOS_KERNEL
+# Only the language interpreters use floating point (SSE2); task switches
+# are cooperative and interrupt handlers never touch SSE, so that's safe.
+KERNEL_CFLAGS := $(KERNEL_CFLAGS_BASE) -mgeneral-regs-only
+LANG_CFLAGS := $(KERNEL_CFLAGS_BASE) -msse2 -mno-80387 -fno-math-errno
 
-KERNEL_C := $(wildcard kernel/*.c kernel/drv/*.c kernel/arch/$(ARCH)/*.c fs/*.c)
+KERNEL_C := $(wildcard kernel/*.c kernel/drv/*.c kernel/lang/*.c kernel/arch/$(ARCH)/*.c fs/*.c)
 KERNEL_S := $(wildcard kernel/arch/$(ARCH)/*.S)
 KERNEL_OBJS := $(patsubst %.c,$(B)/%.o,$(KERNEL_C)) $(patsubst %.S,$(B)/%.o,$(KERNEL_S))
-KERNEL_HDRS := $(wildcard kernel/*.h kernel/drv/*.h kernel/arch/$(ARCH)/*.h fs/*.h include/*.h)
+KERNEL_HDRS := $(wildcard kernel/*.h kernel/drv/*.h kernel/lang/*.h kernel/arch/$(ARCH)/*.h fs/*.h include/*.h)
 ROOTFS_FILES := $(shell find rootfs -type f 2>/dev/null | sed 's/ /\\ /g')
 
 .PHONY: all run test clean
@@ -41,6 +45,10 @@ $(B)/BOOTX64.EFI: loader/loader.c loader/efi.h include/bootinfo.h
 $(B)/font.h: tools/gen_font.py
 	@mkdir -p $(B)
 	python3 tools/gen_font.py $(FONT) $@
+
+$(B)/kernel/lang/%.o: kernel/lang/%.c $(KERNEL_HDRS) $(B)/font.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LANG_CFLAGS) -c $< -o $@
 
 $(B)/%.o: %.c $(KERNEL_HDRS) $(B)/font.h
 	@mkdir -p $(dir $@)

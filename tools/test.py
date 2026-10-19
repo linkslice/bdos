@@ -151,7 +151,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.2" in out, out
+    assert "bdos 0.3" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -159,7 +159,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.2 (x86-64)")
+    vm.cmd("ver", "bdos version 0.3 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -303,7 +303,46 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.2", 10, start)
+    vm.wait_for("bdos version 0.3", 10, start)
+
+
+def t_basic(vm):
+    vm.cmd("cd \\demos")
+    vm.cmd("recurse", ["10! = 3628800", "fib(20) = 6765", "Move disc 3 from A to C",
+                       "sqrt(2) = 1.41421356", "pi = 3.14159265", "sin(30 deg) = 0.5",
+                       "Upper: BDOS", "2^10 = 1024", "17 DIV 5 = 3", "17 MOD 5 = 2"])
+    vm.cmd("primes", ["2 3 5 7 11", "199", "46 primes below 200"])
+    out = vm.cmd("mandel", "@", timeout=120)
+    assert out.count("\n") > 20, out
+    vm.cmd("cd \\")
+    start = len(vm.log)
+    vm.send("hello\r")
+    vm.wait_for("name?", 10, start)
+    vm.send("Bryan\r")
+    out = vm.settle(start)
+    assert "Nice to meet you, Bryan." in out and "*****" in out, out
+    # immediate mode, program entry, SAVE, errors and SYS
+    start = len(vm.log)
+    vm.send("basic\r")
+    vm.wait_for(">", 10, start)
+    for l in ['10 FOR I=1 TO 3', '20 PRINT "line ";I', '30 NEXT', 'RUN']:
+        vm.send(l + "\r")
+        time.sleep(0.1)
+    vm.wait_for("line 3", 10, start)
+    for l in ['LIST', 'SAVE "\\testdir\\count.bas"', 'PRINT 6*7', 'PRINT 1/0',
+              'SYS "OS_Time" TO t : PRINT t > 0', 'PRINT LEFT$("bdos rocks", 4); MID$("abcdef", 3, 2)',
+              'QUIT']:
+        vm.send(l + "\r")
+        time.sleep(0.2)
+    out = vm.settle(start)
+    for want in ["20 PRINT \"line \";I", "42", "Division by zero", "-1", "bdoscd"]:
+        assert want in out, f"{want!r} missing:\n{out}"
+    vm.cmd("type \\testdir\\count.bas", "30 NEXT")
+    vm.cmd("count", "Bad command")                     # not on PATH
+    vm.cmd("\\testdir\\count", "line 3")              # by path
+    vm.cmd("echo PRINT 2+ > bad.bas")
+    vm.cmd("bad", "Syntax error at line 1")
+    vm.cmd("del bad.bas")
 
 
 def t_screens(vm):
@@ -319,7 +358,8 @@ try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
-                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("screens", t_screens),
+                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic),
+                     ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):
             check(name, fn, vm)

@@ -238,6 +238,8 @@ static void scr_size(struct console *c, int *w, int *h)
 static void scr_gotoxy(struct console *c, int x, int y)
 {
 	(void)c;
+	if (mirror && y != cy)
+		serial_putc('\n');	/* keep the COM1 transcript line by line */
 	if (cursor_on)
 		draw_cursor(0);
 	cx = MAX(0, MIN(x, cols - 1));

@@ -345,6 +345,27 @@ def t_basic(vm):
     vm.cmd("del bad.bas")
 
 
+def t_dos(vm):
+    vm.cmd("cd \\dosapps")
+    vm.cmd("hello one two", ["Hello from 16-bit DOS on bdos!", "Command tail:[ one two]"])
+    vm.cmd("primes", "1229 primes below 10000", timeout=60)
+    vm.cmd("fileio", ["File written and read back by a DOS program.", "DOSTEST.TXT"])
+    vm.cmd("echo %ERRORLEVEL%", "7")
+    vm.cmd("type dostest.txt", "File written and read back")      # visible to bdos
+    vm.cmd("helloexe", "Hello from an .EXE with relocations!")
+    vm.cmd("echo %ERRORLEVEL%", "5")
+    start = len(vm.log)
+    vm.send("askname\r")
+    vm.wait_for("your name?", 10, start)
+    vm.send("Bryan\r")
+    out = vm.settle(start)
+    assert "Pleased to meet you, Bryan!" in out, out
+    vm.cmd("box", "Written straight to B800:0000")
+    vm.screenshot("07-dos-box")
+    vm.cmd("cls")
+    vm.cmd("cd \\")
+
+
 def t_desktop(vm):
     vm.cmd("cd \\")
     start = len(vm.log)
@@ -399,7 +420,7 @@ try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
-                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic),
+                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("dos", t_dos),
                      ("desktop", t_desktop), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):

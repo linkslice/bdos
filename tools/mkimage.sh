@@ -6,7 +6,7 @@
 #        \EFI\BOOT\BOOTX64.EFI   the loader
 #        \BDOS\KERNEL.SYS        the kernel
 #        \BDOS\ROOTFS.IMG        fallback C: when there's no SATA disk
-#   2  bdosfs (type 0xBD, 127 MiB): drive C:, filled from rootfs/
+#   2  bdosfs (type 0xBD, 127 MiB): drive C:, filled from rootfs/ (staged in build/)
 set -e
 OUT=$1 B=$2
 SIZE_MB=192
@@ -39,5 +39,5 @@ mcopy -i "$IMG" "$B/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$IMG" "$B/KERNEL.SYS" ::/BDOS/KERNEL.SYS
 mcopy -i "$IMG" "$B/ROOTFS.IMG" ::/BDOS/ROOTFS.IMG
 
-"$B/mkbdosfs" "$OUT" $((BFS_START * 512)) $((BFS_SECTORS * 512)) BDOS rootfs
+"$B/mkbdosfs" "$OUT" $((BFS_START * 512)) $((BFS_SECTORS * 512)) BDOS "$B/rootfs"
 echo "built $OUT"

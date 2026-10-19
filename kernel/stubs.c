@@ -1,13 +1,6 @@
 /* stubs.c - placeholders for subsystems still being built */
 #include "kernel.h"
 
-int com_run(const char *p, int argc, char **argv)
-{
-	(void)argc; (void)argv;
-	kprintf("The 8086 emulator isn't built in yet (%s)\n", p);
-	return 1;
-}
-
 int cint_run_file(const char *p, int argc, char **argv)
 {
 	(void)argc; (void)argv;

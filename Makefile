@@ -27,7 +27,7 @@ KERNEL_CFLAGS_BASE := -target x86_64-unknown-none-elf -ffreestanding -fno-pic -f
 KERNEL_CFLAGS := $(KERNEL_CFLAGS_BASE) -mgeneral-regs-only
 LANG_CFLAGS := $(KERNEL_CFLAGS_BASE) -msse2 -mno-80387 -fno-math-errno
 
-KERNEL_C := $(wildcard kernel/*.c kernel/drv/*.c kernel/lang/*.c kernel/gui/*.c kernel/arch/$(ARCH)/*.c fs/*.c)
+KERNEL_C := $(wildcard kernel/*.c kernel/drv/*.c kernel/lang/*.c kernel/gui/*.c kernel/dos/*.c kernel/arch/$(ARCH)/*.c fs/*.c)
 KERNEL_S := $(wildcard kernel/arch/$(ARCH)/*.S)
 KERNEL_OBJS := $(patsubst %.c,$(B)/%.o,$(KERNEL_C)) $(patsubst %.S,$(B)/%.o,$(KERNEL_S))
 KERNEL_HDRS := $(wildcard kernel/*.h kernel/drv/*.h kernel/lang/*.h kernel/gui/*.h kernel/arch/$(ARCH)/*.h fs/*.h include/*.h)
@@ -65,12 +65,29 @@ $(B)/mkbdosfs: tools/mkbdosfs.c fs/bdosfs.c fs/bdosfs.h
 	@mkdir -p $(B)
 	$(HOSTCC) -O2 -Wall -Wextra -std=gnu11 -o $@ tools/mkbdosfs.c fs/bdosfs.c
 
-# A small copy of C: that the loader can hand over when there is no disk
-$(B)/ROOTFS.IMG: $(B)/mkbdosfs $(ROOTFS_FILES)
-	rm -f $@
-	$(B)/mkbdosfs $@ 0 2097152 BDOS rootfs
+# DOS programs, assembled from dos/*.asm into C:\DOSAPPS
+DOS_SRCS := $(wildcard dos/*.asm)
+DOS_BINS := $(patsubst dos/%.asm,$(B)/dosapps/%,$(DOS_SRCS))
+$(B)/dosapps/%: dos/%.asm
+	@mkdir -p $(B)/dosapps
+	nasm -f bin -o $(B)/dosapps/$$(echo $* | tr a-z A-Z).$$(grep -q "^hdr:" $< && echo EXE || echo COM) $<
+	@touch $@
 
-$(B)/bdos.img: $(B)/BOOTX64.EFI $(B)/KERNEL.SYS $(B)/ROOTFS.IMG $(B)/mkbdosfs tools/mkimage.sh $(ROOTFS_FILES)
+# The C: drive contents: rootfs/ plus generated programs
+$(B)/rootfs.stamp: $(ROOTFS_FILES) $(DOS_BINS)
+	rm -rf $(B)/rootfs
+	cp -r rootfs $(B)/rootfs
+	mkdir -p $(B)/rootfs/DOSAPPS
+	cp $(B)/dosapps/*.COM $(B)/dosapps/*.EXE $(B)/rootfs/DOSAPPS/
+	cp dos/*.asm $(B)/rootfs/DOSAPPS/
+	touch $@
+
+# A small copy of C: that the loader can hand over when there is no disk
+$(B)/ROOTFS.IMG: $(B)/mkbdosfs $(B)/rootfs.stamp
+	rm -f $@
+	$(B)/mkbdosfs $@ 0 4194304 BDOS $(B)/rootfs
+
+$(B)/bdos.img: $(B)/BOOTX64.EFI $(B)/KERNEL.SYS $(B)/ROOTFS.IMG $(B)/mkbdosfs tools/mkimage.sh $(B)/rootfs.stamp
 	sh tools/mkimage.sh $@ $(B)
 
 run: $(B)/bdos.img

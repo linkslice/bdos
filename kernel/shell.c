@@ -1812,7 +1812,7 @@ static int cmd_help(struct cmd *c)
 				return 0;
 		}
 	(void)c;
-	kprintf("\nRun programs (.BAT, .BAS, .COM, .C) by typing their name.\n"
+	kprintf("\nRun programs (.COM, .EXE, .BAT, .BAS, .C) by typing their name.\n"
 	    "Redirect with > >> < and chain with |. Unix names work too: "
 	    "ls, cat, cp, rm...\nType ALIAS to see them all.\n\n");
 	return 0;
@@ -1847,7 +1847,7 @@ static const struct command *find_command(const char *name, int *unix_style)
 	return NULL;
 }
 
-static const char *const prog_exts[] = { ".COM", ".BAT", ".BAS", ".C" };
+static const char *const prog_exts[] = { ".COM", ".EXE", ".BAT", ".BAS", ".C" };
 
 /* Look for NAME, NAME.COM, NAME.BAT, NAME.BAS, NAME.C here and on PATH. */
 static int find_program(struct shell *sh, const char *name, char *out, size_t n)
@@ -1905,7 +1905,7 @@ static int run_program(struct shell *sh, const char *path, int argc, char **argv
 		return run_batch(path, argc, argv);
 	if (ext && !strcasecmp(ext, ".BAS"))
 		return basic_run_file(path, argc, argv);
-	if (ext && !strcasecmp(ext, ".COM")) {
+	if (ext && (!strcasecmp(ext, ".COM") || !strcasecmp(ext, ".EXE"))) {
 		extern int com_run(const char *path, int argc, char **argv);
 		return com_run(path, argc, argv);
 	}

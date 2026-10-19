@@ -345,6 +345,47 @@ def t_basic(vm):
     vm.cmd("del bad.bas")
 
 
+def t_desktop(vm):
+    vm.cmd("cd \\")
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.screenshot("04-desktop")
+    vm.send("\r")                                   # Program Manager: launch Shell
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    vm.cmd("ver", "bdos version 0.3")
+    vm.cmd("echo color #3a3a6e > DESK$")
+    vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
+    vm.cmd("type MOUSE$", " ")
+    vm.cmd("echo rect 300 10 200 60 #ffcc00 > DRAW$")   # draw on our own window
+    vm.cmd("echo text 310 30 #000000 drawn with DRAW$ > DRAW$")
+    # a desktop inside a window
+    vm.cmd("echo run WIN > DESK$")
+    time.sleep(3)
+    start = len(vm.log)
+    vm.send("\r")                                   # the nested Program Manager has focus
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    vm.cmd("type DESK$", ["desktop level 1", "color #5b3f72"])
+    vm.screenshot("06-nested")
+    start = len(vm.log)
+    vm.send("echo exit > DESK$\r")                   # leave the nested desktop
+    vm.wait_for("press any key", 10, start)
+    vm.send(" ")
+    time.sleep(1)
+    vm.cmd("echo run C:\\DEMOS\\DRAW.BAS > DESK$")  # a BASIC program's own window
+    time.sleep(3)
+    vm.screenshot("05-windows")
+    # leave the real desktop: Alt+X, then confirm
+    start = len(vm.log)
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version 0.3")              # back at the full-screen prompt
+
+
 def t_screens(vm):
     vm.cmd("cls")
     vm.cmd("cd \\")
@@ -359,7 +400,7 @@ try:
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
                      ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic),
-                     ("screens", t_screens),
+                     ("desktop", t_desktop), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):
             check(name, fn, vm)

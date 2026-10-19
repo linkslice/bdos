@@ -61,6 +61,35 @@ static void die(const char *what, int err)
 	exit(1);
 }
 
+/* "name rest" or "\"name with spaces\" rest" */
+static int split_meta(const char *line, char *name, size_t nn, char *rest, size_t rn)
+{
+	const char *p = line;
+	size_t o = 0;
+	while (*p == ' ')
+		p++;
+	if (*p == '#' || !*p || *p == '\n')
+		return 0;
+	if (*p == '"') {
+		p++;
+		while (*p && *p != '"' && o + 1 < nn)
+			name[o++] = *p++;
+		if (*p == '"')
+			p++;
+	} else {
+		while (*p && *p != ' ' && *p != '\n' && o + 1 < nn)
+			name[o++] = *p++;
+	}
+	name[o] = 0;
+	while (*p == ' ')
+		p++;
+	o = 0;
+	while (*p && *p != '\n' && *p != '\r' && o + 1 < rn)
+		rest[o++] = *p++;
+	rest[o] = 0;
+	return name[0] && rest[0];
+}
+
 static void apply_meta(struct bfs *fs, uint32_t dir, const char *hostdir)
 {
 	char p[4096], line[512];
@@ -69,7 +98,7 @@ static void apply_meta(struct bfs *fs, uint32_t dir, const char *hostdir)
 	if (f) {
 		while (fgets(line, sizeof line, f)) {
 			char name[256], attrs[16] = "";
-			if (sscanf(line, "%255s %15s", name, attrs) < 2 || name[0] == '#')
+			if (!split_meta(line, name, sizeof name, attrs, sizeof attrs))
 				continue;
 			uint32_t ino;
 			struct bfs_stat st;
@@ -93,7 +122,7 @@ static void apply_meta(struct bfs *fs, uint32_t dir, const char *hostdir)
 	if (f) {
 		while (fgets(line, sizeof line, f)) {
 			char name[256], kv[256];
-			if (sscanf(line, "%255s %255s", name, kv) < 2 || name[0] == '#')
+			if (!split_meta(line, name, sizeof name, kv, sizeof kv))
 				continue;
 			char *eq = strchr(kv, '=');
 			uint32_t ino;

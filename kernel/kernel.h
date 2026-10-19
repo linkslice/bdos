@@ -140,6 +140,7 @@ struct task {
 	int waiters;
 	struct task *next;
 	void *user;			/* per-subsystem data (shell state) */
+	void *desk;			/* the desktop this task lives on, if any */
 };
 
 void task_init(void);

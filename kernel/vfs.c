@@ -410,6 +410,7 @@ struct vfile {
 	uint64_t pos;
 	int flags;
 	struct chardev *dev;
+	int dev_done;
 };
 
 struct vfile *vfs_open(const char *abs, int flags, int *err)
@@ -463,8 +464,14 @@ fail:
 
 long vfs_read(struct vfile *f, void *buf, size_t n)
 {
-	if (f->dev)
-		return f->dev->read ? f->dev->read(f->dev, buf, n) : 0;
+	if (f->dev) {
+		if (f->dev_done)
+			return 0;
+		long r = f->dev->read ? f->dev->read(f->dev, buf, n) : 0;
+		if (f->dev->once)
+			f->dev_done = 1;
+		return r;
+	}
 	long r = f->d->ops->read(f->d->ctx, f->path, f->pos, buf, n);
 	if (r > 0)
 		f->pos += (uint64_t)r;
@@ -864,8 +871,8 @@ static long con_dev_write(struct chardev *d, const void *buf, size_t n)
 	return (long)n;
 }
 
-static struct chardev nul_dev = { "NUL", nul_read, nul_write, NULL };
-static struct chardev con_dev = { "CON", con_dev_read, con_dev_write, NULL };
+static struct chardev nul_dev = { "NUL", nul_read, nul_write, NULL, 0 };
+static struct chardev con_dev = { "CON", con_dev_read, con_dev_write, NULL, 0 };
 
 /* ---- boot-time discovery ------------------------------------------------------------ */
 

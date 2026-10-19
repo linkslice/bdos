@@ -183,6 +183,14 @@ static void wrap_init(struct wrapcon *w, struct console *parent)
 	w->parent = parent;
 }
 
+/* The console underneath any redirection wrappers. */
+struct console *console_unwrap(struct console *c)
+{
+	while (c && c->write == wc_write)
+		c = ((struct wrapcon *)c)->parent;
+	return c;
+}
+
 int stdin_is_pipe(void)
 {
 	struct console *c = task_current()->con;

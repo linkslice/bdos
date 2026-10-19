@@ -6,8 +6,9 @@ bdos roadmap
 [x] AHCI disks and the journaled bdosfs filesystem
 [x] COMMAND.COM: batch files, pipes, redirection, Unix aliases
 [x] EDIT, the full-screen editor
-[ ] BBC-style BASIC and run-from-source C
-[ ] Device-based desktop: CON, MOUSE$, DRAW$, DESK$
+[x] BBC-style BASIC
+[ ] Run-from-source C
+[x] Device-based desktop: CON, MOUSE$, DRAW$, DESK$, nesting
 [ ] WIN \\HOST remote sessions with a T: drive
 [ ] 8086 emulator for classic .COM programs
 [ ] Lemote Yeeloong (MIPS64) port

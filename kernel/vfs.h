@@ -72,6 +72,7 @@ struct chardev {
 	long (*read)(struct chardev *, void *buf, size_t n);	/* non-blocking */
 	long (*write)(struct chardev *, const void *buf, size_t n);
 	void *priv;
+	int once;	/* a status device: one read per open, then end-of-file */
 };
 
 struct vfile;

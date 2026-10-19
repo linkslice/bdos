@@ -59,6 +59,7 @@ struct task *task_spawn(const char *name, void (*fn)(void *), void *arg,
 	if (t->con)
 		t->con->refs++;
 	strncpy0(t->cwd, current->cwd, sizeof t->cwd);
+	t->desk = current->desk;
 	arch_task_setup(&t->ctx, (uint8_t *)t->stack + STACK_PAGES * PAGE_SIZE, task_start);
 
 	uint64_t f = irq_save();

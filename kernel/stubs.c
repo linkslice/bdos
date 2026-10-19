@@ -15,10 +15,21 @@ int cint_run_file(const char *p, int argc, char **argv)
 	return 1;
 }
 
-int desktop_run(const char *remote)
+int remote_desktop(const char *host)
 {
-	(void)remote;
-	kprintf("The desktop isn't built in yet\n");
+	kprintf("Networking isn't built in yet (%s)\n", host);
+	return 1;
+}
+
+int console_is_remote(struct console *c)
+{
+	(void)c;
+	return 0;
+}
+
+int remote_session_desktop(struct console *c)
+{
+	(void)c;
 	return 1;
 }
 

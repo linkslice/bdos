@@ -71,7 +71,7 @@ struct termwin {
 	struct task *task;
 	int closed;		/* the window is gone: input reads as end-of-file */
 	int hold;		/* keep the window after the command ends */
-	struct wm *child;	/* a nested desktop drawing in this window */
+	int child;		/* a nested desktop or remote view owns the pixels */
 	struct evq child_ev;
 	struct termwin *next_zombie;
 };
@@ -426,9 +426,7 @@ static void win_destroy(struct wm *wm, struct win *w)
 		wm->progman = NULL;
 	if (w->term) {
 		struct termwin *t = w->term;
-		t->closed = 1;
-		if (t->child)
-			t->child->running = 0;
+		t->closed = 1;	/* a display hosted here sees the close */
 		t->win = NULL;
 		/* the shell task may still be running: free the console when it dies */
 		t->next_zombie = zombies;
@@ -1623,8 +1621,9 @@ static void td_flush(struct display *d, struct rect r)
 
 static void td_attach(struct display *d, struct wm *wm)
 {
+	(void)wm;
 	struct term_disp *td = (struct term_disp *)d;
-	td->t->child = wm;	/* text drawing stops; events go to the desktop */
+	td->t->child = 1;	/* text drawing stops; events go to the display */
 }
 
 static int td_event(struct display *d, struct event *e)
@@ -1637,26 +1636,21 @@ static int td_event(struct display *d, struct event *e)
 	return evq_pop(&td->t->child_ev, e);
 }
 
-/* WIN: start a desktop on whatever this task's console is. */
-int desktop_run(const char *remote)
+/*
+ * A local display for whatever console a task is on: the whole screen, or
+ * the inside of its desktop window. Used by WIN and by the remote viewer.
+ */
+struct display *display_open(struct console *c, int *err)
 {
-	struct task *me = task_current();
-	if (remote && *remote) {
-		extern int remote_desktop(const char *host);
-		return remote_desktop(remote);
-	}
-	/* Look through redirection wrappers for the real console. */
-	struct console *c = me->con;
 	extern struct console *console_unwrap(struct console *c);
 	c = console_unwrap(c);
-
 	if (c == screen_console()) {
 		struct screen_disp *sd = kzalloc(sizeof *sd);
 		const struct bdos_framebuffer *fb = &bootinfo->fb;
 		if (!sd || surf_init(&sd->back, (int)fb->width, (int)fb->height)) {
 			kfree(sd);
-			kprintf("Not enough memory for the desktop\n");
-			return 1;
+			*err = E_NOMEM;
+			return NULL;
 		}
 		sd->d.surf = &sd->back;
 		sd->d.flush = scr_flush;
@@ -1669,21 +1663,19 @@ int desktop_run(const char *remote)
 		while (input_getkey() >= 0)
 			;
 		screen_suspend(1);
-		int r = desktop_run_on(&sd->d, "Program Manager");
-		screen_suspend(0);
-		surf_free(&sd->back);
-		kfree(sd);
-		return r;
+		return &sd->d;
 	}
 	if (console_is_termwin(c)) {
 		struct termwin *t = c->priv;
-		if (t->child) {
-			kprintf("This window already has a desktop.\n");
-			return 1;
+		if (t->child || !t->win) {
+			*err = E_ACCES;
+			return NULL;
 		}
 		struct term_disp *td = kzalloc(sizeof *td);
-		if (!td)
-			return 1;
+		if (!td) {
+			*err = E_NOMEM;
+			return NULL;
+		}
 		td->t = t;
 		td->d.surf = &t->win->content;
 		td->d.flush = td_flush;
@@ -1692,25 +1684,72 @@ int desktop_run(const char *remote)
 		td->d.name = "window";
 		td->d.attach = td_attach;
 		memset(&t->child_ev, 0, sizeof t->child_ev);
-		char title[48];
-		snprintf(title, sizeof title, "Program Manager (level %d)",
-		    ((struct wm *)me->desk ? ((struct wm *)me->desk)->depth : 0) + 1);
-		int r = desktop_run_on(&td->d, title);
-		t->child = NULL;
-		if (!t->closed && t->win) {
-			tw_redraw(t);
-			win_dirty_all(t->win);
-		}
-		kfree(td);
-		return r;
+		return &td->d;
 	}
+	*err = E_NOTSUP;
+	return NULL;
+}
+
+void display_close(struct display *d)
+{
+	if (!strcmp(d->name, "screen")) {
+		struct screen_disp *sd = (struct screen_disp *)d;
+		screen_suspend(0);
+		surf_free(&sd->back);
+		kfree(sd);
+		return;
+	}
+	struct term_disp *td = (struct term_disp *)d;
+	struct termwin *t = td->t;
+	t->child = 0;
+	if (!t->closed && t->win) {
+		tw_redraw(t);
+		win_dirty_all(t->win);
+	}
+	kfree(td);
+}
+
+int display_depth(void)
+{
+	struct wm *wm = task_current()->desk;
+	return wm ? wm->depth + 1 : 0;
+}
+
+/* WIN: start a desktop on whatever this task's console is. */
+int desktop_run(const char *remote)
+{
+	struct task *me = task_current();
+	if (remote && *remote) {
+		extern int remote_desktop(const char *host);
+		return remote_desktop(remote);
+	}
+	extern struct console *console_unwrap(struct console *c);
+	struct console *c = console_unwrap(me->con);
 	extern int console_is_remote(struct console *c);
 	if (console_is_remote(c)) {
 		extern int remote_session_desktop(struct console *c);
 		return remote_session_desktop(c);
 	}
-	kprintf("WIN needs a screen or a desktop window (this console is %s).\n", c->name);
-	return 1;
+	int err = 0;
+	struct display *d = display_open(c, &err);
+	if (!d) {
+		if (err == E_ACCES)
+			kprintf("This window already has a desktop.\n");
+		else if (err == E_NOTSUP)
+			kprintf("WIN needs a screen or a desktop window (this console is %s).\n", c->name);
+		else
+			kprintf("Not enough memory for the desktop\n");
+		return 1;
+	}
+	char title[48];
+	int depth = display_depth();
+	if (depth)
+		snprintf(title, sizeof title, "Program Manager (level %d)", depth);
+	else
+		strcpy(title, "Program Manager");
+	int r = desktop_run_on(d, title);
+	display_close(d);
+	return r;
 }
 
 /* ---- canvas windows for programs: the Win_ SYS calls ------------------------------------ */

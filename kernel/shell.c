@@ -546,7 +546,7 @@ static int cmd_dir(struct cmd *c)
 	if (r) {
 		if (c->unix_style)
 			return fail(c, a, r);
-		kprintf("File not found\n");
+		kprintf(r == E_BADDRIVE ? "Invalid drive specification\n" : "File not found\n");
 		return 1;
 	}
 	struct pager pg;
@@ -1674,14 +1674,10 @@ static int cmd_ctty(struct cmd *c)
 	} else if (!strcasecmp(a, "CON")) {
 		target = screen_console();
 		screen_mirror(1);
-	} else {
-		extern struct console *remote_console_open(const char *host, int *err);
-		if (a[0] == '\\' && a[1] == '\\') {
-			int err = 0;
-			target = remote_console_open(a + 2, &err);
-			if (!target)
-				return fail(c, a, err);
-		}
+	} else if (a[0] == '\\' && a[1] == '\\') {
+		/* CTTY \\HOST: this console becomes a terminal on HOST */
+		extern int remote_tty(const char *host);
+		return remote_tty(a);
 	}
 	if (!target) {
 		kprintf("Invalid device - %s\n", a);
@@ -1696,6 +1692,103 @@ static int cmd_win(struct cmd *c)
 {
 	extern int desktop_run(const char *remote);
 	return desktop_run(arg(c, 0));
+}
+
+/* --- networking --- */
+
+#include "net/net.h"
+
+static void view_cb(const char *name, const uint8_t mac[6], void *arg)
+{
+	int *n = arg;
+	kprintf("  \\\\%-20s %02x:%02x:%02x:%02x:%02x:%02x%s\n", name, mac[0], mac[1], mac[2], mac[3],
+	    mac[4], mac[5], strcasecmp(name, net_hostname()) ? "" : "  (this machine)");
+	(*n)++;
+}
+
+static void use_cb(struct vfs_drive *d, void *arg)
+{
+	int *n = arg;
+	if (d->desc[0] == '\\') {
+		kprintf("  %c:  %s\n", d->letter, d->desc);
+		(*n)++;
+	}
+}
+
+static int cmd_net(struct cmd *c)
+{
+	const char *sub = arg(c, 0);
+	if (!net_present()) {
+		kprintf("No network adapter found.\n");
+		return 1;
+	}
+	if (!sub) {
+		uint8_t mac[6];
+		net_mac(mac);
+		kprintf("\n  This machine:  \\\\%s\n  Adapter:       %02x:%02x:%02x:%02x:%02x:%02x\n"
+		    "  Protocol:      BDNET (Ethernet, LAN only)\n\n"
+		    "  NET VIEW                    machines on this network\n"
+		    "  NET USE X: \\\\HOST\\C\\DIR    map a drive (NET USE X: /DELETE)\n"
+		    "  CTTY \\\\HOST, WIN \\\\HOST     a shell or the desktop of HOST\n\n",
+		    net_hostname(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+		return 0;
+	}
+	if (!strcasecmp(sub, "VIEW")) {
+		int n = 0;
+		kprintf("\nMachines on this network:\n\n");
+		net_view(1000, view_cb, &n);
+		kprintf("\n  %d machine(s)\n\n", n);
+		return 0;
+	}
+	if (!strcasecmp(sub, "USE")) {
+		extern int net_use(char letter, const char *unc);
+		extern int net_unuse(char letter);
+		const char *drive = arg(c, 1), *target = arg(c, 2);
+		if (!drive) {
+			int n = 0;
+			kprintf("\nMapped drives:\n\n");
+			vfs_drives(use_cb, &n);
+			if (!n)
+				kprintf("  (none)\n");
+			kprintf("\n");
+			return 0;
+		}
+		if (strlen(drive) != 2 || drive[1] != ':') {
+			kprintf("Usage: NET USE X: \\\\HOST\\C\\DIR\n");
+			return 1;
+		}
+		if (has_flag(c, 'D')) {
+			int r = net_unuse(drive[0]);
+			return r ? fail(c, drive, r) : 0;
+		}
+		if (!target || target[0] != '\\') {
+			kprintf("Usage: NET USE X: \\\\HOST\\C\\DIR\n");
+			return 1;
+		}
+		int r = net_use(drive[0], target);
+		if (r) {
+			kprintf("Can't map %s: %s\n", target, r == E_NOENT ? "not found" :
+			    r == E_INVAL ? "use a letter from D: to Z: (not T:)" : vfs_strerror(r));
+			return 1;
+		}
+		kprintf("%c: is now %s\n", toupper(drive[0]), target);
+		return 0;
+	}
+	kprintf("Unknown NET command - %s\n", sub);
+	return 1;
+}
+
+static int cmd_hostname(struct cmd *c)
+{
+	const char *name = arg(c, 0);
+	if (!name) {
+		kprintf("%s\n", net_hostname()[0] ? net_hostname() : "(no network)");
+		return 0;
+	}
+	net_set_hostname(name);
+	vfs_spew("C:\\BDOS\\HOSTNAME.TXT", net_hostname(), strlen(net_hostname()));
+	kprintf("This machine is now \\\\%s\n", net_hostname());
+	return 0;
 }
 
 /* --- command tables --- */
@@ -1738,6 +1831,7 @@ static const struct command commands[] = {
 	{ "FOR",     cmd_for,     "FOR %V IN (set) DO command" },
 	{ "GOTO",    cmd_goto,    "Jump to a :label in a batch file" },
 	{ "HELP",    cmd_help,    "This list" },
+	{ "HOSTNAME", cmd_hostname, "Show or set this machine's network name" },
 	{ "HWINFO",  cmd_hwinfo,  "Show PCI devices and disks" },
 	{ "IF",      cmd_if,      "IF [NOT] EXIST f | ERRORLEVEL n | a==b  command" },
 	{ "LABEL",   cmd_label,   "Set a drive's volume label" },
@@ -1746,6 +1840,7 @@ static const struct command commands[] = {
 	{ "MKDIR",   cmd_md,      NULL },
 	{ "MORE",    cmd_more,    "Show input a screen at a time" },
 	{ "MOVE",    cmd_move,    "Move or rename files and directories" },
+	{ "NET",     cmd_net,     "Networking: NET VIEW, NET USE" },
 	{ "PATH",    cmd_path,    "Show or set where programs are found" },
 	{ "PAUSE",   cmd_pause,   "Wait for a key" },
 	{ "PROMPT",  cmd_prompt,  "Set the prompt ($P path $G > $D date $T time)" },
@@ -1796,6 +1891,7 @@ static const struct alias aliases[] = {
 	{ "vi",     "EDIT" },
 	{ "df",     "DRIVES" },
 	{ "lspci",  "HWINFO" },
+	{ "hostname", "HOSTNAME" },
 	{ "env",    "SET" },
 };
 

@@ -89,6 +89,10 @@ int vfs_unmount(char letter)
 struct vfs_drive *vfs_drive(char letter)
 {
 	letter = (char)toupper(letter);
+	/* a remote session's T: belongs to the tasks in that session only */
+	struct task *t = task_current();
+	if (letter == 'T' && t && t->tdrive)
+		return t->tdrive;
 	if (letter < 'A' || letter > 'Z' || !drives[letter - 'A'].ops)
 		return NULL;
 	return &drives[letter - 'A'];
@@ -96,9 +100,13 @@ struct vfs_drive *vfs_drive(char letter)
 
 void vfs_drives(void (*cb)(struct vfs_drive *d, void *arg), void *arg)
 {
-	for (int i = 0; i < 26; i++)
-		if (drives[i].ops)
+	struct task *t = task_current();
+	for (int i = 0; i < 26; i++) {
+		if (i == 'T' - 'A' && t && t->tdrive)
+			cb(t->tdrive, arg);
+		else if (drives[i].ops)
 			cb(&drives[i], arg);
+	}
 }
 
 void dev_register(struct chardev *d)

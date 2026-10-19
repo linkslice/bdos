@@ -54,6 +54,9 @@ void kernel_late_init(void)
 	storage_init();
 	extern void desktop_init(void);
 	desktop_init();
+	extern void net_init(void), remote_init(void);
+	remote_init();
+	net_init();
 }
 
 void kmain(struct bdos_bootinfo *bi)

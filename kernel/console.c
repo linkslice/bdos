@@ -33,6 +33,14 @@ uint32_t pixel_pack(uint32_t rgb)
 	return (b << 16) | (g << 8) | r;
 }
 
+uint32_t pixel_unpack(uint32_t px)
+{
+	uint32_t a = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, b = px & 0xFF;
+	if (fb_format == BDOS_PIXEL_BGRX)
+		return (a << 16) | (g << 8) | b;
+	return (b << 16) | (g << 8) | a;
+}
+
 static void draw_cell(int col, int row)
 {
 	if (suspended)

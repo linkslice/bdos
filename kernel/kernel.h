@@ -105,6 +105,7 @@ struct console *screen_console(void);
 void screen_suspend(int off);		/* the desktop takes over the display */
 void screen_mirror(int on);		/* echo the screen to COM1 */
 uint32_t pixel_pack(uint32_t rgb);	/* 0xRRGGBB -> framebuffer pixel */
+uint32_t pixel_unpack(uint32_t px);	/* framebuffer pixel -> 0xRRGGBB */
 extern const uint32_t cga_palette[16];
 void console_panic_mode(void);		/* force output to the screen */
 struct console *serial_console(void);
@@ -141,6 +142,7 @@ struct task {
 	struct task *next;
 	void *user;			/* per-subsystem data (shell state) */
 	void *desk;			/* the desktop this task lives on, if any */
+	void *tdrive;			/* a session's T: drive (struct vfs_drive) */
 };
 
 void task_init(void);

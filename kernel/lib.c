@@ -60,6 +60,129 @@ int strcmp(const char *a, const char *b)
 
 int toupper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
 int tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+int isdigit(int c) { return c >= '0' && c <= '9'; }
+int isalpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+int isalnum(int c) { return isalpha(c) || isdigit(c); }
+int isspace(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+int strncmp(const char *a, const char *b, size_t n)
+{
+	for (; n; n--, a++, b++) {
+		if (*a != *b)
+			return (uint8_t)*a - (uint8_t)*b;
+		if (!*a)
+			return 0;
+	}
+	return 0;
+}
+
+char *strchr(const char *s, int c)
+{
+	for (;; s++) {
+		if (*s == (char)c)
+			return (char *)s;
+		if (!*s)
+			return NULL;
+	}
+}
+
+char *strrchr(const char *s, int c)
+{
+	const char *r = NULL;
+	for (;; s++) {
+		if (*s == (char)c)
+			r = s;
+		if (!*s)
+			return (char *)r;
+	}
+}
+
+char *strstr(const char *h, const char *n)
+{
+	size_t l = strlen(n);
+	for (; *h; h++)
+		if (!strncmp(h, n, l))
+			return (char *)h;
+	return l ? NULL : (char *)h;
+}
+
+char *strcat0(char *d, const char *s, size_t n)
+{
+	size_t l = strlen(d);
+	if (l < n)
+		strncpy0(d + l, s, n - l);
+	return d;
+}
+
+long strtol(const char *s, const char **end, int base)
+{
+	long v = 0;
+	int neg = 0;
+	while (isspace(*s))
+		s++;
+	if (*s == '-' || *s == '+')
+		neg = (*s++ == '-');
+	if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+		base = 16;
+	} else if (base == 0) {
+		base = 10;
+	}
+	for (;; s++) {
+		int d;
+		if (isdigit(*s))
+			d = *s - '0';
+		else if (isalpha(*s))
+			d = toupper(*s) - 'A' + 10;
+		else
+			break;
+		if (d >= base)
+			break;
+		v = v * base + d;
+	}
+	if (end)
+		*end = s;
+	return neg ? -v : v;
+}
+
+/* '*' matches any run, '?' one character, case-insensitive. DOS-style
+ * "*.*" also matches names without a dot. */
+int wildmatch(const char *p, const char *s)
+{
+	if (!strcmp(p, "*.*"))
+		return 1;
+	const char *star = NULL, *ss = NULL;
+	while (*s) {
+		if (*p == '?' || (*p && toupper(*p) == toupper(*s))) {
+			p++;
+			s++;
+		} else if (*p == '*') {
+			star = p++;
+			ss = s;
+		} else if (star) {
+			p = star + 1;
+			s = ++ss;
+		} else {
+			return 0;
+		}
+	}
+	while (*p == '*')
+		p++;
+	return !*p;
+}
+
+/* CRC-32C (Castagnoli), bitwise; metadata blocks are small. */
+uint32_t crc32c(uint32_t crc, const void *buf, size_t n)
+{
+	const uint8_t *p = buf;
+	crc = ~crc;
+	while (n--) {
+		crc ^= *p++;
+		for (int k = 0; k < 8; k++)
+			crc = (crc >> 1) ^ (0x82F63B78 & (0 - (crc & 1)));
+	}
+	return ~crc;
+}
 
 int strcasecmp(const char *a, const char *b)
 {
@@ -272,8 +395,19 @@ _Noreturn void panic(const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof buf, fmt, ap);
 	va_end(ap);
+	irq_disable();
+	console_panic_mode();
 	con_write("\n*** bdos panic: ");
 	con_write(buf);
+	/* frame-pointer backtrace: resolve with addr2line -e build/KERNEL.SYS */
+	uint64_t *fp = __builtin_frame_address(0);
+	con_write("\n*** backtrace:");
+	for (int i = 0; i < 16 && fp && (uint64_t)fp > 0x100000; i++) {
+		char a[24];
+		snprintf(a, sizeof a, " %lx", fp[1]);
+		con_write(a);
+		fp = (uint64_t *)fp[0];
+	}
 	con_write("\n*** System halted.\n");
 	for (;;)
 		__asm__ volatile("cli; hlt");

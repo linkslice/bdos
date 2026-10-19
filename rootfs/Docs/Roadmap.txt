@@ -1,0 +1,13 @@
+bdos roadmap
+------------
+[x] UEFI loader (no third-party bootloader)
+[x] Framebuffer console, PS/2 keyboard and mouse, COM1
+[x] Memory manager, interrupts, cooperative tasks
+[x] AHCI disks and the journaled bdosfs filesystem
+[x] COMMAND.COM: batch files, pipes, redirection, Unix aliases
+[x] EDIT, the full-screen editor
+[ ] BBC-style BASIC and run-from-source C
+[ ] Device-based desktop: CON, MOUSE$, DRAW$, DESK$
+[ ] WIN \\HOST remote sessions with a T: drive
+[ ] 8086 emulator for classic .COM programs
+[ ] Lemote Yeeloong (MIPS64) port

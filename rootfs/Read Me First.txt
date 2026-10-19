@@ -1,0 +1,28 @@
+bdos - Bryan Disk Operating System
+==================================
+
+A 64-bit, single-user operating system that should feel like home to
+anyone who grew up at a C:\> prompt.
+
+Drive C: is a bdosfs volume: long names (with 8.3 aliases for old
+programs), case-preserving, journaled, and checksummed. Try CHKDSK.
+
+Both DOS and Unix habits work:
+
+    DIR /W     is the same as   ls
+    DIR        is the same as   ls -l
+    TYPE FILE  is the same as   cat file
+    COPY A B   is the same as   cp a b
+    CD \GAMES  is the same as   cd /games
+
+Under DIR, '/' starts a switch and '\' separates paths.
+Under ls, '-' starts a switch and '/' separates paths.
+
+Things to try:
+
+    EDIT HELLO.BAS       the editor; F5 runs what you're editing
+    HELLO                runs HELLO.BAS
+    TREE /F              everything on the drive
+    DIR | SORT /R | MORE pipes
+    ECHO hi > NOTE.TXT   redirection
+    WIN                  the desktop

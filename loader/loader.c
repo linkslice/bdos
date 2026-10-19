@@ -150,7 +150,9 @@ static void setup_graphics(struct bdos_framebuffer *fb)
 
 /* ---- Kernel file -------------------------------------------------------- */
 
-static void *read_kernel(EFI_HANDLE image, UINTN *size_out)
+/* Read a whole file from the boot volume. optional: return NULL if absent. */
+static void *read_file(EFI_HANDLE image, CHAR16 *path, UINTN *size_out, int optional,
+    EFI_MEMORY_TYPE type)
 {
 	EFI_GUID li_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
 	EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
@@ -168,9 +170,15 @@ static void *read_kernel(EFI_HANDLE image, UINTN *size_out)
 	st = fs->OpenVolume(fs, &root);
 	if (EFI_ERROR(st))
 		fail(L"cannot open boot volume", st);
-	st = root->Open(root, &file, KERNEL_PATH, EFI_FILE_MODE_READ, 0);
-	if (EFI_ERROR(st))
-		fail(L"cannot open " KERNEL_PATH, st);
+	st = root->Open(root, &file, path, EFI_FILE_MODE_READ, 0);
+	if (EFI_ERROR(st)) {
+		root->Close(root);
+		if (optional)
+			return NULL;
+		puts16(L"\r\n");
+		puts16(path);
+		fail(L"cannot open file", st);
+	}
 
 	uint64_t size;
 	file->SetPosition(file, 0xFFFFFFFFFFFFFFFFULL);	/* seek to end */
@@ -178,13 +186,15 @@ static void *read_kernel(EFI_HANDLE image, UINTN *size_out)
 	file->SetPosition(file, 0);
 
 	void *buf;
-	st = BS->AllocatePool(EfiLoaderData, size, &buf);
+	EFI_PHYSICAL_ADDRESS pa;
+	st = BS->AllocatePages(AllocateAnyPages, type, (size + 4095) / 4096, &pa);
 	if (EFI_ERROR(st))
-		fail(L"out of memory reading kernel", st);
+		fail(L"out of memory reading a file", st);
+	buf = (void *)pa;
 	UINTN n = size;
 	st = file->Read(file, &n, buf);
 	if (EFI_ERROR(st) || n != size)
-		fail(L"error reading kernel", st);
+		fail(L"error reading a file", st);
 	file->Close(file);
 	root->Close(root);
 
@@ -360,7 +370,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	uint64_t stack_top = bi_addr + (bi_pages + STACK_PAGES) * 4096;
 
 	UINTN ksize;
-	uint8_t *kimg = read_kernel(image, &ksize);
+	/* The ELF file itself is scratch: boot-services memory, reusable later. */
+	uint8_t *kimg = read_file(image, KERNEL_PATH, &ksize, 0, EfiBootServicesData);
 	uint64_t lo, hi;
 	uint64_t entry = load_elf(kimg, ksize, &lo, &hi);
 	bi->kernel_base = lo;
@@ -370,6 +381,16 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	puts16(L", ");
 	putdec((hi - lo) / 1024);
 	puts16(L" KiB\r\n");
+
+	UINTN rsize;
+	void *rootfs = read_file(image, L"\\BDOS\\ROOTFS.IMG", &rsize, 1, EfiLoaderData);
+	if (rootfs) {
+		bi->rootfs_base = (uint64_t)rootfs;
+		bi->rootfs_size = rsize;
+		puts16(L"Root filesystem image loaded, ");
+		putdec(rsize / 1024);
+		puts16(L" KiB\r\n");
+	}
 
 	bi->acpi_rsdp = find_rsdp();
 

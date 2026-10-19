@@ -49,6 +49,8 @@ struct bdos_bootinfo {
 	uint64_t acpi_rsdp;	/* physical address, 0 if not found */
 	uint64_t kernel_base;
 	uint64_t kernel_size;
+	uint64_t rootfs_base;	/* \BDOS\ROOTFS.IMG if present, else 0 */
+	uint64_t rootfs_size;
 	uint32_t nranges;
 	uint32_t _pad;
 	struct bdos_memrange ranges[BDOS_MAX_MEMRANGES];

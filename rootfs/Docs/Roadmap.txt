@@ -9,6 +9,6 @@ bdos roadmap
 [x] BBC-style BASIC
 [ ] Run-from-source C
 [x] Device-based desktop: CON, MOUSE$, DRAW$, DESK$, nesting
-[ ] WIN \\HOST remote sessions with a T: drive
+[x] WIN \\HOST and CTTY \\HOST sessions with a T: drive; NET VIEW, NET USE
 [x] 8086 emulator for .COM and .EXE programs
 [ ] Lemote Yeeloong (MIPS64) port

@@ -2741,8 +2741,13 @@ static int scr_event(struct display *d, struct event *e)
 	}
 	struct mouse_event m;
 	if (input_getmouse(&m)) {
-		sd->mx = MAX(0, MIN(sd->mx + m.dx, sd->back.w - 1));
-		sd->my = MAX(0, MIN(sd->my + m.dy, sd->back.h - 1));
+		if (m.abs) {	/* vmmouse: the pointer sits exactly under the host's */
+			sd->mx = MIN((int)((int64_t)m.ax * sd->back.w / 65535), sd->back.w - 1);
+			sd->my = MIN((int)((int64_t)m.ay * sd->back.h / 65535), sd->back.h - 1);
+		} else {
+			sd->mx = MAX(0, MIN(sd->mx + m.dx, sd->back.w - 1));
+			sd->my = MAX(0, MIN(sd->my + m.dy, sd->back.h - 1));
+		}
 		int type = EV_MOVE;
 		if ((m.buttons & 1) && !(sd->buttons & 1))
 			type = EV_DOWN;

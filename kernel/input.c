@@ -82,6 +82,35 @@ static int scale(int d, int *rem)
 	return out;
 }
 
+/* absolute devices: the newest position wins, so just overwrite a queued
+ * absolute event with the same buttons */
+static int abs_seen;
+
+int input_mouse_is_abs(void)
+{
+	return abs_seen;
+}
+
+void input_mouse_abs(int x, int y, int buttons)
+{
+	abs_seen = 1;
+	if (mouse_swap)
+		buttons = (buttons & ~3) | ((buttons & 1) << 1) | ((buttons & 2) >> 1);
+	if (mhead != mtail) {
+		unsigned last = (mhead + MQ - 1) % MQ;
+		if (mice[last].abs && mice[last].buttons == buttons) {
+			mice[last].ax = x;
+			mice[last].ay = y;
+			return;
+		}
+	}
+	unsigned next = (mhead + 1) % MQ;
+	if (next == mtail)
+		return;
+	mice[mhead] = (struct mouse_event){ 0, 0, buttons, 1, x, y };
+	mhead = next;
+}
+
 void input_mouse(int dx, int dy, int buttons)
 {
 	dx = scale(dx, &rem_x);
@@ -91,7 +120,7 @@ void input_mouse(int dx, int dy, int buttons)
 	/* Coalesce motion with the newest queued event if buttons match. */
 	if (mhead != mtail) {
 		unsigned last = (mhead + MQ - 1) % MQ;
-		if (mice[last].buttons == buttons) {
+		if (!mice[last].abs && mice[last].buttons == buttons) {
 			mice[last].dx += dx;
 			mice[last].dy += dy;
 			return;
@@ -100,9 +129,7 @@ void input_mouse(int dx, int dy, int buttons)
 	unsigned next = (mhead + 1) % MQ;
 	if (next == mtail)
 		return;
-	mice[mhead].dx = dx;
-	mice[mhead].dy = dy;
-	mice[mhead].buttons = buttons;
+	mice[mhead] = (struct mouse_event){ dx, dy, buttons, 0, 0, 0 };
 	mhead = next;
 }
 

@@ -137,16 +137,98 @@ static void mouse_byte(uint8_t b)
 	input_mouse(dx, -dy, mpkt[0] & 7);
 }
 
+/*
+ * The VMware "vmmouse" backdoor, which QEMU and VirtualBox also provide:
+ * an absolute pointer, so the guest pointer sits exactly under the host's
+ * cursor (no drift, no grabbing). It still raises IRQ 12 with a dummy PS/2
+ * packet; the real data comes through I/O port 0x5658.
+ */
+#define VMW_MAGIC	0x564D5868u
+#define VMW_PORT	0x5658
+#define VMW_GETVERSION	10
+#define VMM_DATA	39
+#define VMM_STATUS	40
+#define VMM_COMMAND	41
+#define VMM_READ_ID	0x45414552u
+#define VMM_ABSOLUTE	0x53424152u
+#define VMM_DISABLE	0x000000F5u
+#define VMM_VERSION	0x3442554Au
+
+static int vmmouse_on;
+
+struct vmw_regs {
+	uint32_t a, b, c, d;
+};
+
+static void vmw_call(uint32_t cmd, uint32_t arg, struct vmw_regs *r)
+{
+	uint32_t a = VMW_MAGIC, b = arg, c = cmd, d = VMW_PORT;
+	__asm__ volatile("inl %%dx, %%eax" : "+a"(a), "+b"(b), "+c"(c), "+d"(d) : : "memory");
+	r->a = a;
+	r->b = b;
+	r->c = c;
+	r->d = d;
+}
+
+static int vmmouse_init(void)
+{
+	struct vmw_regs r;
+	vmw_call(VMW_GETVERSION, ~VMW_MAGIC, &r);
+	if (r.b != VMW_MAGIC || r.a == 0xFFFFFFFFu)
+		return 0;		/* not a VMware-compatible hypervisor */
+	vmw_call(VMM_COMMAND, VMM_READ_ID, &r);
+	vmw_call(VMM_STATUS, 0, &r);
+	if ((r.a & 0xFFFF) < 1 || (r.a & 0xFFFF0000u) == 0xFFFF0000u)
+		return 0;
+	vmw_call(VMM_DATA, 1, &r);
+	if (r.a != VMM_VERSION) {
+		vmw_call(VMM_COMMAND, VMM_DISABLE, &r);
+		return 0;
+	}
+	vmw_call(VMM_COMMAND, VMM_ABSOLUTE, &r);
+	return 1;
+}
+
+static void vmmouse_drain(void)
+{
+	for (int guard = 0; guard < 64; guard++) {
+		struct vmw_regs r;
+		vmw_call(VMM_STATUS, 0, &r);
+		if ((r.a & 0xFFFF0000u) == 0xFFFF0000u) {	/* error: fall back to PS/2 */
+			vmmouse_on = 0;
+			return;
+		}
+		if ((r.a & 0xFFFF) < 4)
+			return;
+		vmw_call(VMM_DATA, 4, &r);
+		int b = 0;
+		if (r.a & 0x20)
+			b |= 1;		/* left */
+		if (r.a & 0x10)
+			b |= 2;		/* right */
+		if (r.a & 0x08)
+			b |= 4;		/* middle */
+		input_mouse_abs((int)(r.b & 0xFFFF), (int)(r.c & 0xFFFF), b);
+	}
+}
+
 static void ps2_irq(void)
 {
+	int mouse_seen = 0;
 	while (inb(STATUS) & 1) {
 		uint8_t st = inb(STATUS);
 		uint8_t b = inb(DATA);
-		if (st & 0x20)
-			mouse_byte(b);
-		else
+		if (st & 0x20) {
+			if (vmmouse_on)
+				mouse_seen = 1;	/* the PS/2 bytes are only a doorbell */
+			else
+				mouse_byte(b);
+		} else {
 			kbd_byte(b);
+		}
 	}
+	if (mouse_seen)
+		vmmouse_drain();
 }
 
 static int wait_write(void)
@@ -200,6 +282,8 @@ void ps2_init(void)
 	ctl_cmd(0xA8);			/* enable the aux (mouse) port */
 	if (mouse_cmd(0xF6) == 0xFA && mouse_cmd(0xF4) == 0xFA)	/* defaults, stream on */
 		mouse_ok = 1;
+	if (mouse_ok)
+		vmmouse_on = vmmouse_init();
 	for (int i = 0; i < 64 && (inb(STATUS) & 1); i++)
 		(void)inb(DATA);
 

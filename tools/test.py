@@ -22,6 +22,7 @@ class VM:
     def __init__(self, name="vm", extra=()):
         self.ser_path = os.path.join(tmp, name + ".ser")
         self.mon_path = os.path.join(tmp, name + ".mon")
+        self.qmp_path = os.path.join(tmp, name + ".qmp")
         vars_copy = os.path.join(tmp, name + ".vars")
         shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", vars_copy)
         self.proc = subprocess.Popen([
@@ -32,10 +33,15 @@ class VM:
             "-vga", "std", "-display", "none",
             "-serial", f"unix:{self.ser_path},server=on,wait=off",
             "-monitor", f"unix:{self.mon_path},server=on,wait=off",
+            "-qmp", f"unix:{self.qmp_path},server=on,wait=off",
             *extra,
         ])
         self.ser = self._connect(self.ser_path)
         self.monsock = self._connect(self.mon_path)
+        self.qmp = self._connect(self.qmp_path)
+        self.qmp.settimeout(5)
+        self._qmp_read()                        # greeting
+        self._qmp({"execute": "qmp_capabilities"})
         self.log = b""
         self.lock = threading.Lock()
         self.alive = True
@@ -112,7 +118,33 @@ class VM:
             self.monsock.sendall(f"sendkey {k}\n".encode())
             time.sleep(0.08)
 
-    # ---- the mouse, through the QEMU monitor (PS/2, 1:1 at the default speed)
+    # ---- QMP: absolute pointer events, the way a host cursor arrives
+    def _qmp_read(self):
+        buf = b""
+        while not buf.endswith(b"\n"):
+            buf += self.qmp.recv(65536)
+        return buf
+
+    def _qmp(self, msg):
+        import json
+        self.qmp.sendall(json.dumps(msg).encode() + b"\n")
+        while b'"return"' not in self._qmp_read():
+            pass                                # skip async events
+
+    def _input(self, *events):
+        self._qmp({"execute": "input-send-event", "arguments": {"events": list(events)}})
+        time.sleep(0.08)
+
+    def point(self, x, y):
+        vx = int((x + 0.5) * 32767 / 1024)
+        vy = int((y + 0.5) * 32767 / 768)
+        self._input({"type": "abs", "data": {"axis": "x", "value": vx}},
+                    {"type": "abs", "data": {"axis": "y", "value": vy}})
+
+    def button(self, down):
+        self._input({"type": "btn", "data": {"down": bool(down), "button": "left"}})
+
+    # ---- the monitor
     def mon(self, c):
         self.monsock.sendall((c + "\n").encode())
         time.sleep(0.15)
@@ -127,21 +159,27 @@ class VM:
         return wins, (int(mp[0]), int(mp[1]))
 
     def move_to(self, x, y):
-        _, (cx, cy) = self.windows()
-        self.mon(f"mouse_move {x - cx} {y - cy}")
+        self.point(x, y)
         time.sleep(0.3)
+        _, here = self.windows()
+        assert here == (x, y), f"pointer at {here}, wanted {(x, y)}"
+
+    def click(self):
+        self.button(1)
+        self.button(0)
+        time.sleep(0.5)
 
     def drag(self, x0, y0, x1, y1, steps=4):
         self.move_to(x0, y0)
-        self.mon("mouse_button 1")
-        for _ in range(steps):
-            self.mon(f"mouse_move {(x1 - x0) // steps} {(y1 - y0) // steps}")
-        self.mon("mouse_button 0")
+        self.button(1)
+        for i in range(1, steps + 1):
+            self.point(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps)
+        self.button(0)
         time.sleep(0.5)
 
     def double_click(self):
         for b in (1, 0, 1, 0):
-            self.mon(f"mouse_button {b}")
+            self.button(b)
         time.sleep(0.6)
 
     def screenshot(self, name):
@@ -191,7 +229,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.8 (x86-64)")
+    vm.cmd("ver", "bdos version 0.8.1 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -455,9 +493,7 @@ def t_control(vm):
     assert wins["Shell"][:3] == (0, 0, 1024), wins["Shell"]
     mx, my, mw, mh = wins["Shell"]
     vm.move_to(mx + mw - 4 - 36 + 8, my + 4 + 8)
-    vm.mon("mouse_button 1")
-    vm.mon("mouse_button 0")
-    time.sleep(0.6)
+    vm.click()
     wins, _ = vm.windows()
     assert wins["Shell"] == (x, y, w, h), wins["Shell"]
     # the Control Panel, and an applet driven from the keyboard
@@ -483,9 +519,7 @@ def t_control(vm):
     wins, _ = vm.windows()
     x, y, w, h = wins["Program Manager"]
     vm.move_to(x + w - 4 - 9, y + 4 + 8)
-    vm.mon("mouse_button 1")
-    vm.mon("mouse_button 0")
-    time.sleep(1)
+    vm.click()
     vm.screenshot("11-exit-dialog")
     shot = Image.open(os.path.join(OUT, "11-exit-dialog.png")).convert("RGB")
     raw = shot.crop((302, 241, 722, 329)).tobytes()
@@ -582,6 +616,31 @@ try:
             check(name, fn, vm)
 finally:
     vm.close()
+
+# Real PCs have no vmmouse: the plain PS/2 (relative) mouse must still work.
+def t_ps2mouse(vm2):
+    vm2.wait_for("C:\\>", 90)
+    start = len(vm2.log)
+    vm2.send("win\r")
+    time.sleep(3)
+    vm2.send("\r")
+    vm2.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    _, (x, y) = vm2.windows()
+    vm2.mon("mouse_move 100 -50")
+    time.sleep(0.4)
+    _, (x2, y2) = vm2.windows()
+    assert (x2, y2) == (x + 100, y - 50), f"PS/2 mouse went {(x, y)} -> {(x2, y2)}"
+
+
+if suite("ps2mouse"):
+    disk = os.path.join(tmp, "disk2.img")
+    shutil.copy(IMG, disk)
+    vm2 = VM("ps2", ["-machine", "vmport=off"])
+    try:
+        check("ps2mouse", t_ps2mouse, vm2)
+    finally:
+        vm2.close()
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

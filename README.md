@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.8 (x86-64) - Bryan Disk Operating System
+bdos 0.8.1 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -139,7 +139,8 @@ docs/                   PORTING-YEELOONG.md
 ## Known limits
 
 - PS/2 input only: there's no USB stack, so real hardware needs the
-  firmware's legacy emulation.
+  firmware's legacy emulation. Under QEMU, VMware and VirtualBox the mouse
+  uses the vmmouse absolute pointer, so it tracks the host cursor exactly.
 - BDNET works on a single LAN segment. It doesn't use IP, so it can't cross
   routers.
 - Tasks are cooperative. A program that never calls into the system can hog

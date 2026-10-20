@@ -867,6 +867,8 @@ static void open_mouse(struct wm *wm)
 	form_add(f, FW_LABEL, 256, 30, 0, 0, "to test:");
 	m->test = form_add(f, FW_CUSTOM, 256, 52, 110, 96, NULL);
 	form_custom(f, m->test, mouse_test);
+	if (input_mouse_is_abs())	/* vmmouse: the pointer is wherever the host cursor is */
+		form_add(f, FW_LABEL, 14, 218, 0, 0, "Pointer follows your host's cursor here.");
 	m->swap = form_add(f, FW_CHECK, 14, 192, 300, 22, "Swap left and right buttons");
 	form_set_val(f, m->swap, m->o_swap);
 	m->ok = ok_cancel(f, cw, ch, 0);

@@ -102,6 +102,10 @@ void arch_switch(struct arch_context *from, struct arch_context *to);
 void arch_task_setup(struct arch_context *ctx, void *stack_top,
     void (*entry)(void));
 _Noreturn void arch_reboot(void);
+_Noreturn void arch_halt(void);		/* interrupts off, stop for good */
+/* PCI configuration space (mechanism #1 on PCs; the Bonito bridge on a Yeeloong) */
+uint32_t arch_pci_read32(int bus, int slot, int func, uint8_t off);
+void arch_pci_write32(int bus, int slot, int func, uint8_t off, uint32_t v);
 void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s);
 
 /* Non-local exits for the language interpreters */

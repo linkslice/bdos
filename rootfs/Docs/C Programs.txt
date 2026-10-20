@@ -1,0 +1,71 @@
+C programs on bdos
+==================
+
+A .C file is a program. Type its name and it runs - there's no compiler,
+linker or object file, just like BASIC. Edit it with EDIT and run it again.
+
+    C:\>EDIT HELLO.C
+    C:\>HELLO world
+    Hello from C on bdos!
+
+Arguments arrive in argc/argv as usual, and main's return value becomes
+%ERRORLEVEL%, so C programs work in batch files too.
+
+What you can use
+----------------
+Types       char int short long float double (float is double), unsigned,
+            pointers, arrays of any rank, struct, enum, typedef
+Statements  if else while do for switch case default break continue return
+Operators   all of them, including ?: , casts, sizeof, compound assignment
+Functions   recursion, prototypes, static locals, structs passed and
+            returned by value
+Prepro-     #include (every standard header is built in, so includes are
+cessor      accepted and ignored), #define with and without arguments,
+            #ifdef #ifndef #if 0 #else #endif, __LINE__, __BDOS__
+
+Not there (yet): unions, goto, function pointers, bit-fields, the full
+<stdio.h> FILE API. Errors are reported with the file and line, and a bad
+pointer stops the program with a message instead of crashing anything:
+
+    C:\>CERR
+    CERR.C:7: null pointer used
+
+Ctrl-C stops a runaway program.
+
+The library
+-----------
+stdio    printf sprintf snprintf puts putchar getchar gets fgets scanf
+string   strlen strcpy strncpy strcat strncat strcmp strncmp strcasecmp
+         strchr strrchr strstr memset memcpy memmove memcmp
+stdlib   malloc calloc realloc free atoi atol atof abs rand srand exit
+         system (runs a bdos command)
+math     sqrt sin cos tan asin acos atan atan2 exp log log10 pow floor
+         ceil fabs fmod, M_PI
+ctype    isdigit isalpha isalnum isspace isupper islower ispunct
+         toupper tolower
+time     time clock
+conio    clrscr gotoxy getch getche kbhit textcolor textattr putch
+         delay sleep, and the Turbo C colour names (BLUE, YELLOW, ...)
+
+The SYS calls: changing the machine from C
+------------------------------------------
+Any function your program calls but doesn't define is looked up in the
+SYS table - the same table BASIC reaches with SYS. Case and underscores
+don't matter:
+
+    C                                 BASIC
+    desk_color(0x204060);             SYS "Desk_Color", &204060
+    w = win_open("Hi", -1, -1, 300, 200);
+                                      SYS "Win_Open", "Hi", -1, -1, 300, 200 TO w%
+    os_sleep(100);                    SYS "OS_Sleep", 100
+
+Type HELP SYS for the whole list. #include <desk.h> is accepted for
+documentation's sake; it also gives you the Window type.
+
+Try these
+---------
+C:\HELLO.C             the basics
+C:\DEMOS\SIEVE.C       arrays and loops
+C:\DEMOS\LIST.C        structs, pointers and malloc
+C:\DEMOS\DRAW.C        a window to draw in (on the desktop)
+C:\DEMOS\SUNSET.C      a program that repaints the desktop it runs on

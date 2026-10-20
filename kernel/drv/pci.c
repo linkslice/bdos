@@ -1,4 +1,4 @@
-/* pci.c - PCI configuration space through the legacy 0xCF8/0xCFC ports */
+/* pci.c - PCI bus enumeration; config-space access comes from the arch layer */
 #include "../kernel.h"
 #include "drv.h"
 
@@ -7,16 +7,12 @@ static int ndevs;
 
 uint32_t pci_read32(struct pci_dev *d, uint8_t off)
 {
-	outl(0xCF8, 0x80000000u | (uint32_t)d->bus << 16 | (uint32_t)d->slot << 11 |
-	    (uint32_t)d->func << 8 | (off & 0xFC));
-	return inl(0xCFC);
+	return arch_pci_read32(d->bus, d->slot, d->func, off);
 }
 
 void pci_write32(struct pci_dev *d, uint8_t off, uint32_t v)
 {
-	outl(0xCF8, 0x80000000u | (uint32_t)d->bus << 16 | (uint32_t)d->slot << 11 |
-	    (uint32_t)d->func << 8 | (off & 0xFC));
-	outl(0xCFC, v);
+	arch_pci_write32(d->bus, d->slot, d->func, off, v);
 }
 
 static uint32_t raw_read(int bus, int slot, int func, uint8_t off)

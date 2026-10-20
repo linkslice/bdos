@@ -9,6 +9,7 @@
  * %0-%9, GOTO, IF, FOR, CALL and SHIFT.
  */
 #include "kernel.h"
+#include "sysapi.h"
 #include "vfs.h"
 #include "drv/drv.h"
 
@@ -1895,10 +1896,43 @@ static const struct alias aliases[] = {
 	{ "env",    "SET" },
 };
 
+struct sys_help_ctx {
+	struct pager *pg;
+	int stop;
+};
+
+static void sys_help_cb(const struct sys_entry *e, void *arg)
+{
+	struct sys_help_ctx *h = arg;
+	if (h->stop || !e->help)
+		return;
+	kprintf("  %s\n", e->help);
+	if (pager_line(h->pg))
+		h->stop = 1;
+}
+
 static int cmd_help(struct cmd *c)
 {
 	struct pager pg;
 	pager_init(&pg, 1);
+	if (c->argc > 1 && !strcasecmp(c->argv[1], "SYS")) {
+		kprintf("\nSYS calls, for BASIC (SYS \"Win_Open\", ...) and C (win_open(...)):\n\n");
+		pager_line(&pg);
+		pager_line(&pg);
+		struct sys_help_ctx h = { &pg, 0 };
+		sys_list(sys_help_cb, &h);
+		kprintf("\n");
+		return 0;
+	}
+	if (c->argc > 1) {
+		for (size_t i = 0; i < NELEM(commands); i++)
+			if (!strcasecmp(commands[i].name, c->argv[1]) && commands[i].help) {
+				kprintf("%s - %s\n", commands[i].name, commands[i].help);
+				return 0;
+			}
+		kprintf("No help for %s. Try HELP, or HELP SYS for the SYS calls.\n", c->argv[1]);
+		return 1;
+	}
 	kprintf("\n");
 	pager_line(&pg);
 	for (size_t i = 0; i < NELEM(commands); i++)
@@ -1910,7 +1944,7 @@ static int cmd_help(struct cmd *c)
 	(void)c;
 	kprintf("\nRun programs (.COM, .EXE, .BAT, .BAS, .C) by typing their name.\n"
 	    "Redirect with > >> < and chain with |. Unix names work too: "
-	    "ls, cat, cp, rm...\nType ALIAS to see them all.\n\n");
+	    "ls, cat, cp, rm...\nType ALIAS to see them all, and HELP SYS for the calls programs can make.\n\n");
 	return 0;
 }
 

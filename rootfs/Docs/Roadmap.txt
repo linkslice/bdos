@@ -7,8 +7,8 @@ bdos roadmap
 [x] COMMAND.COM: batch files, pipes, redirection, Unix aliases
 [x] EDIT, the full-screen editor
 [x] BBC-style BASIC
-[ ] Run-from-source C
+[x] Run-from-source C (see "C Programs.txt")
 [x] Device-based desktop: CON, MOUSE$, DRAW$, DESK$, nesting
 [x] WIN \\HOST and CTTY \\HOST sessions with a T: drive; NET VIEW, NET USE
 [x] 8086 emulator for .COM and .EXE programs
-[ ] Lemote Yeeloong (MIPS64) port
+[ ] Lemote Yeeloong (MIPS64) port - planned, arch layer split (docs/PORTING-YEELOONG.md)

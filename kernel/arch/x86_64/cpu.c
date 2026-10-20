@@ -313,6 +313,26 @@ void arch_task_setup(struct arch_context *ctx, void *stack_top, void (*entry)(vo
 
 /* ---- Reboot and clock --------------------------------------------------- */
 
+_Noreturn void arch_halt(void)
+{
+	for (;;)
+		__asm__ volatile("cli; hlt");
+}
+
+uint32_t arch_pci_read32(int bus, int slot, int func, uint8_t off)
+{
+	outl(0xCF8, 0x80000000u | (uint32_t)bus << 16 | (uint32_t)slot << 11 |
+	    (uint32_t)func << 8 | (off & 0xFC));
+	return inl(0xCFC);
+}
+
+void arch_pci_write32(int bus, int slot, int func, uint8_t off, uint32_t v)
+{
+	outl(0xCF8, 0x80000000u | (uint32_t)bus << 16 | (uint32_t)slot << 11 |
+	    (uint32_t)func << 8 | (off & 0xFC));
+	outl(0xCFC, v);
+}
+
 _Noreturn void arch_reboot(void)
 {
 	irq_disable();

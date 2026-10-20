@@ -1,12 +1,16 @@
-# bdos — Bryan Disk Operating System
+# bdos: Bryan Disk Operating System
 
 A 64-bit, single-user OS that should feel like home to anyone who grew up at
-a `C:\>` prompt. Boots on UEFI with its own loader, no third-party bootloader.
+a `C:\>` prompt. It boots on UEFI with its own loader and drops you at a DOS
+prompt. `WIN` starts a Program Manager desktop that works like Plan 9:
+desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
+in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.1 (x86-64) - Bryan Disk Operating System
-255,848 K memory, 1024x768 display
+bdos 0.7 (x86-64) - Bryan Disk Operating System
+255,848 K memory, 1024x768 display, mouse
 
+Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
 Welcome to bdos. Type HELP for a list of commands.
 
 C:\>_
@@ -14,79 +18,135 @@ C:\>_
 
 ## Build and run
 
-Needs clang, lld, llvm-objcopy, python3 with Pillow, mtools, QEMU and OVMF
-(on Ubuntu/Debian: `clang lld llvm python3-pil mtools qemu-system-x86 ovmf
-fonts-unifont`).
+You need clang, lld, llvm-objcopy, a host cc, python3 with Pillow, mtools,
+nasm, QEMU and OVMF. On Debian or Ubuntu, install `clang lld llvm python3-pil
+mtools nasm qemu-system-x86 ovmf fonts-unifont`.
 
 ```sh
-make          # -> build/bdos.img, a bootable 64 MiB disk image
-make run      # boot it in QEMU; COM1 is your terminal too
-python3 tools/test.py build/bdos.img build/test   # headless smoke test
+make            # build/bdos.img: a 192 MiB disk, with an ESP plus a bdosfs partition
+make run        # boot it in QEMU; COM1 is a terminal too
+make test       # 15 headless suites: shell, files, BASIC, C, DOS, desktop...
+make nettest    # two VMs on one virtual LAN: NET VIEW, CTTY/WIN \\BOX2, NET USE
 ```
 
-`build/bdos.img` also boots on real hardware from a USB stick (`dd` it over),
-as long as the machine can boot UEFI with Secure Boot off and has PS/2 or
-legacy-USB keyboard emulation.
+The image also boots real UEFI PCs from a USB stick if you `dd` it across.
+Secure Boot must be off, and you need a PS/2 keyboard or the firmware's
+legacy USB keyboard emulation.
 
-## What works (0.1)
+## What's in it
 
-- **UEFI loader** (`loader/`): a PE32+ app built from our own `efi.h`. Picks a
-  1024×768 GOP mode, loads `\BDOS\KERNEL.SYS` (ELF64) at 2 MiB, finds the ACPI
-  RSDP, takes the memory map, exits boot services and jumps in with a
-  `struct bdos_bootinfo` (`include/bootinfo.h`).
-- **Kernel** (`kernel/`): own GDT/IDT with exception reporting, framebuffer
-  console using GNU Unifont 8×16 (128×48 at 1024×768), polled PS/2 keyboard,
-  COM1 mirror (output and input), CMOS clock.
-- **Shell**: `DIR` `CD` `TYPE` `CLS` `VER` `ECHO` `REM` `MEM` `ATTRIB` `DATE`
-  `TIME` `ALIAS` `HELP` `REBOOT` `WIN`, batch files, `AUTOEXEC.BAT`, command
-  history (↑/↓), Esc and ^C. DOS habits like `dir/w`, `cd\`, `cd..` and
-  `ECHO.` work.
-- **Unix aliases** that switch parsing rules by invoked name: `ls` `cat`
-  `clear` `pwd` `free` `uname` `man`. As `DIR`, `/` starts a switch and `\`
-  separates paths; as `ls`, `-` starts a switch and `/` separates paths.
-  Aliases are case-sensitive like Unix; DOS commands aren't.
-- **RAM disk C:** a small read-only tree built into the kernel with long,
-  case-preserving names (`Read Me First.txt`) and DOS attributes, standing in
-  until the real filesystem exists.
+**Boot.** `loader/` is our own PE32+ UEFI application. It sets a
+1024×768 GOP mode, loads `\BDOS\KERNEL.SYS` (ELF64) at 2 MiB, collects
+the memory map and RSDP, and exits boot services. It passes a
+`struct bdos_bootinfo` to the kernel.
+
+**Kernel.**
+- Its own page tables, with the framebuffer mapped write-combining.
+- The 8259 PIC and a 1 kHz PIT.
+- Interrupt-driven PS/2 keyboard and mouse, plus COM1.
+- A bitmap page allocator and a slab heap.
+- Cooperative tasks, each with its own console, current directory and desktop.
+
+**bdosfs**, our own filesystem:
+- 4 KiB blocks and two CRC32C superblocks.
+- A metadata journal in ordered mode.
+- Extents, long case-preserving names with 8.3 aliases, extended attributes,
+  and parent pointers.
+- `CHKDSK` checks a volume, and `tools/mkbdosfs` builds and inspects images
+  on the host.
+
+**The shell.** `COMMAND.COM` provides about 60 commands, including:
+- Files and directories: `DIR`, `COPY`, `XCOPY`, `DELTREE`, `TREE`, `ATTRIB`.
+- Batch files with `GOTO`, `IF`, `FOR`, `CALL` and `SHIFT`, plus `%VARS%`,
+  redirection and pipes.
+- `MORE`, `SORT` and `FIND`, tab completion and history.
+- Unix aliases (`ls`, `cat`, `cp`, `rm`…) that also switch to Unix argument
+  parsing.
+
+`EDIT` is a full-screen editor; F5 runs the file you're editing.
+
+**BASIC.** BBC BASIC style:
+- Real numbers, `PROC`/`FN` with `LOCAL`, `REPEAT`/`UNTIL` and block `IF`.
+- Immediate mode with `RUN`, `LIST`, `SAVE` and `RENUMBER`.
+- `SYS "Name", args TO result` calls.
+
+**C, run from source** (`kernel/lang/cint.c`). Type `HELLO.C` and it runs.
+- Supported language: structs, pointers, multi-dimensional arrays, enums,
+  typedefs, recursion and `#define` macros with arguments.
+- Library: printf/scanf, string.h, malloc/free, math.h, and Turbo C's
+  conio.h.
+- Programs run in their own memory image, so a bad pointer is reported as
+  `FILE.C:7: null pointer used` and nothing crashes.
+- Any function a program calls but doesn't define becomes a SYS call. For
+  example, `desk_color(0x204060)` does the same as BASIC's
+  `SYS "Desk_Color", &204060`. `HELP SYS` lists them all.
+- See `C:\Docs\C Programs.txt` on the disk.
+
+**The desktop.** It looks like Windows 3.1 and works like Plan 9:
+- Program Manager groups are folders under `C:\PROGMAN`, and its items are
+  `.lnk` files.
+- Each terminal window is a full shell.
+- Programs talk to the desktop through devices: `DESK$`, `DRAW$` and
+  `MOUSE$`. For example, `echo color #3a3a6e > DESK$`.
+- `WIN` typed inside a window nests a whole desktop in that window, and each
+  level gets its own colour.
+
+**DOS programs.** An 8086 emulator runs `.COM` and MZ `.EXE` programs.
+- It handles INT 21h file and console calls, plus INT 10h, 16h and 1Ah.
+- Writes to B800 text memory are mirrored to the screen.
+- `C:\DOSAPPS` has samples assembled from `dos/*.asm`.
+
+**Networking (BDNET).** A small LAN protocol carried directly on Ethernet,
+in the spirit of NetBEUI, with an e1000 driver.
+- `NET VIEW` finds the other machines on the network.
+- `CTTY \\BOX2` opens a shell on another machine.
+- `WIN \\BOX2` shows its desktop, either full screen or in a window
+  (F12 hangs up).
+- `NET USE E: \\BOX2\C` maps a drive. In every remote session, `T:` is the
+  directory you launched the session from, the same idea as drawterm's
+  `/mnt/term`.
 
 ## Layout
 
 ```
-include/bootinfo.h   loader -> kernel hand-off
-loader/efi.h         minimal UEFI definitions, from the spec
-loader/loader.c      BOOTX64.EFI
-kernel/entry.S       _start and exception stubs
-kernel/cpu.c         GDT, IDT, reboot
-kernel/console.c     framebuffer text console
-kernel/kbd.c         PS/2 + serial input
-kernel/serial.c      COM1
-kernel/mem.c         memory map accounting
-kernel/ramdisk.c     built-in C: drive
-kernel/shell.c       COMMAND.COM
-kernel/lib.c         memcpy, printf and friends
-tools/gen_font.py    Unifont -> build/font.h
-tools/mkimage.sh     MBR + FAT32 ESP image via mtools
-tools/run.sh         QEMU + OVMF
-tools/test.py        boots headless, drives COM1 and the PS/2 keyboard
+include/bootinfo.h      loader -> kernel hand-off
+loader/                 BOOTX64.EFI (efi.h written from the spec)
+kernel/arch/x86_64/     entry, GDT/IDT/paging/PIC/PIT, PS/2, COM1 - all the CPU-specific code
+kernel/*.c              memory, tasks, console, VFS, shell, EDIT, SYS table
+kernel/drv/             PCI, AHCI (+ RAM disk), e1000
+kernel/lang/            BASIC, the C interpreter, soft math
+kernel/gui/             drawing, window manager, Program Manager, File Manager
+kernel/dos/             8086 emulator
+kernel/net/             BDNET and the remote services
+fs/                     bdosfs (shared with the host tool)
+tools/                  mkbdosfs, image builder, font generator, QEMU test harnesses
+dos/                    sample DOS programs (nasm)
+rootfs/                 what ends up on C:
+docs/                   PORTING-YEELOONG.md
 ```
 
 ## Known limits
 
-- Paging still uses the firmware's identity map; no allocator yet.
-- No interrupts: keyboard and serial are polled.
-- Keyboard is PS/2 only (USB needs the firmware's legacy emulation).
-- `.BAS` and `.C` files print their source; the interpreters come later.
+- PS/2 input only: there's no USB stack, so real hardware needs the
+  firmware's legacy emulation.
+- BDNET works on a single LAN segment. It doesn't use IP, so it can't cross
+  routers.
+- Tasks are cooperative. A program that never calls into the system can hog
+  the CPU. The interpreters and the 8086 emulator yield on their own.
+- The 8086 emulator has no timer interrupts or sound, and there's no
+  protected-mode DOS.
+- The C interpreter doesn't support unions, goto, function pointers,
+  bit-fields or `FILE*` I/O yet.
+- File timestamps mix the host's local time with the RTC, so they're offset
+  by your UTC difference.
 
-## Roadmap
+## Next: the Yeeloong
 
-1. Physical page allocator, own page tables, interrupts and a timer
-2. Block device (virtio-blk / AHCI / NVMe) and the bdos filesystem:
-   journaled, CRC32C metadata, long names with 8.3 aliases, extended
-   attributes, plus `mkfs` and image tools for the host
-3. BBC-style BASIC (porting Brandy) and run-from-source C, one shared `SYS` API
-4. Per-process device tables: `CON`, `MOUSE$`, `DRAW$`, `DESK$`
-5. The desktop: Program Manager layout, nestable, `WIN` to start it
-6. Networking, `WIN \\HOST` / `CTTY \\HOST` remote sessions with a `T:` drive
-   mapped to the launching directory
-7. 8086 emulator for classic `.COM` programs
-8. Lemote Yeeloong 8089B (Loongson 2F, MIPS64, PMON) port
+`docs/PORTING-YEELOONG.md` is the plan for the Lemote Yeeloong 8089B:
+- Booting from PMON.
+- XKPHYS instead of page tables.
+- Builds with the Loongson 2F errata flags.
+- Drivers for the SM712, CS5536 IDE and RTL8139.
+
+All CPU-specific code already sits behind `kernel/arch/`. It hasn't been run
+on the hardware.

@@ -39,9 +39,25 @@ double f_sqrt(double x)
 {
 	if (x <= 0)
 		return 0;
+#if defined(__x86_64__)
 	double r;
 	__asm__("sqrtsd %1, %0" : "=x"(r) : "x"(x));
 	return r;
+#else
+	/* portable: Newton's method from a power-of-two first guess */
+	double r = 1;
+	while (r * r < x)
+		r *= 2;
+	while (r * r > 4 * x)
+		r /= 2;
+	for (int i = 0; i < 60; i++) {
+		double nr = 0.5 * (r + x / r);
+		if (nr == r)
+			break;
+		r = nr;
+	}
+	return r;
+#endif
 }
 
 /* sin on [-pi/4, pi/4] and cos likewise, by Taylor series */

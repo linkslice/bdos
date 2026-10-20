@@ -409,6 +409,5 @@ _Noreturn void panic(const char *fmt, ...)
 		fp = (uint64_t *)fp[0];
 	}
 	con_write("\n*** System halted.\n");
-	for (;;)
-		__asm__ volatile("cli; hlt");
+	arch_halt();
 }

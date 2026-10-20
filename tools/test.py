@@ -151,7 +151,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.3" in out, out
+    assert "bdos 0.7" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -159,7 +159,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.3 (x86-64)")
+    vm.cmd("ver", "bdos version 0.7 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -303,7 +303,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.3", 10, start)
+    vm.wait_for("bdos version 0.7", 10, start)
 
 
 def t_basic(vm):
@@ -345,6 +345,31 @@ def t_basic(vm):
     vm.cmd("del bad.bas")
 
 
+def t_c(vm):
+    vm.cmd("cd \\")
+    vm.cmd("md \\testdir")
+    vm.cmd("hello.c world", ["Hello from C on bdos!", "5 squared is 25", "You said: world"])
+    vm.cmd("\\bdos\\tests\\ctest", "ALL OK", absent="FAIL", timeout=40)
+    vm.cmd("\\bdos\\tests\\cerr", ["before", ":7: null pointer used"], absent="after")
+    vm.cmd("cd \\demos")
+    vm.cmd("sieve", ["    2    3    5    7", "997", "168 primes below 1000"], timeout=40)
+    vm.cmd("list", ["Sophie    29", "Grace     85", "average age 52.2"])
+    vm.cmd("draw.c", "start the desktop with WIN first")
+    vm.cmd("help sys", ["Win_Open t$", "Desk_Color", "OS_Sleep"])
+    # edit a program and run it again: run-from-source
+    vm.cmd("echo int main(void) { int x = 6; printf(\"%d\\n\", x * 7); return 3; } > \\testdir\\t.c")
+    vm.cmd("\\testdir\\t", "42")
+    vm.cmd("echo %ERRORLEVEL%", "3")
+    vm.cmd("echo int main() { return y; } > \\testdir\\t.c")
+    vm.cmd("\\testdir\\t", ":1: 'y' undeclared")
+    vm.cmd("cd \\")
+    vm.cmd("cls")
+    vm.cmd("type hello.c", "int main")
+    vm.cmd("hello.c Bryan", "You said: Bryan")
+    vm.cmd("\\demos\\list", "average age")
+    vm.screenshot("08-c")
+
+
 def t_dos(vm):
     vm.cmd("cd \\dosapps")
     vm.cmd("hello one two", ["Hello from 16-bit DOS on bdos!", "Command tail:[ one two]"])
@@ -375,10 +400,13 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.3")
+    vm.cmd("ver", "bdos version 0.7")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
+    vm.cmd("\\demos\\sunset", "desktop is now #3a1d2a", timeout=30)   # C changing its desktop
+    vm.cmd("type DESK$", "color #3a1d2a")
+    vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("echo rect 300 10 200 60 #ffcc00 > DRAW$")   # draw on our own window
     vm.cmd("echo text 310 30 #000000 drawn with DRAW$ > DRAW$")
     # a desktop inside a window
@@ -395,8 +423,9 @@ def t_desktop(vm):
     vm.wait_for("press any key", 10, start)
     vm.send(" ")
     time.sleep(1)
-    vm.cmd("echo run C:\\DEMOS\\DRAW.BAS > DESK$")  # a BASIC program's own window
-    time.sleep(3)
+    # a BASIC program's own window and the same in C, started from C
+    vm.send("\\bdos\\tests\\twowin\r")
+    time.sleep(5)
     vm.screenshot("05-windows")
     # leave the real desktop: Alt+X, then confirm
     start = len(vm.log)
@@ -404,7 +433,7 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.3")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.7")              # back at the full-screen prompt
 
 
 def t_screens(vm):
@@ -420,7 +449,7 @@ try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
-                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("dos", t_dos),
+                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("dos", t_dos),
                      ("desktop", t_desktop), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):

@@ -25,4 +25,12 @@ Things to try:
     TREE /F              everything on the drive
     DIR | SORT /R | MORE pipes
     ECHO hi > NOTE.TXT   redirection
-    WIN                  the desktop
+    HELLO.C              a C program, run straight from source
+    EDIT HELLO.C         ...so change it and run it again
+    HELP SYS             calls BASIC and C programs can make
+    \DOSAPPS\HELLO       a 16-bit DOS program, emulated
+    NET VIEW             other bdos machines on the network
+    CTTY \\BOX2          a shell on one of them (T: is your folder)
+    WIN                  the desktop; WIN \\BOX2 for someone else's
+
+More in C:\Docs.

@@ -15,6 +15,8 @@
 #include "../sysapi.h"
 #include "gfx.h"
 #include "wm.h"
+#include "form.h"
+#include "../settings.h"
 
 #define BORDER		4
 #define TITLE_H		20
@@ -23,9 +25,11 @@
 #define CLIENT_Y	(BORDER + TITLE_H)
 #define FRAME_W(cw)	((cw) + 2 * BORDER)
 #define FRAME_H(ch)	((ch) + 2 * BORDER + TITLE_H)
-#define DCLICK_MS	450
+static int dclick_ms = 450;	/* the mouse.dclick setting */
+#define DCLICK_MS	dclick_ms
+#define GRIP		5	/* how near the edge a press starts a resize */
 
-enum { W_TERM, W_PROGMAN, W_FILES, W_CANVAS, W_DIALOG };
+enum { W_TERM, W_PROGMAN, W_FILES, W_CANVAS, W_DIALOG, W_FORM };
 
 struct theme {
 	uint32_t desktop, face, active, inactive, title_text, menu_text, select;
@@ -34,6 +38,22 @@ struct theme {
 static struct theme theme = {
 	0x2F6F73, 0xC3C3C3, 0x1D3A8A, 0x7B7B7B, 0xFFFFFF, 0x000000, 0x1D3A8A,
 };
+
+/* window colour schemes (the desktop.scheme setting) */
+static const struct scheme schemes[] = {
+	{ "Default", 0xC3C3C3, 0x1D3A8A, 0x7B7B7B, 0xFFFFFF, 0x1D3A8A, 0 },
+	{ "Ocean", 0xB8CCD4, 0x0F5F7F, 0x6F8C98, 0xFFFFFF, 0x0F5F7F, 0 },
+	{ "Plum", 0xCCC2D0, 0x5B2F72, 0x857790, 0xFFFFFF, 0x5B2F72, 0 },
+	{ "Graphite", 0xB4B4B4, 0x303030, 0x7A7A7A, 0xFFFFFF, 0x505050, 0 },
+	{ "Rose", 0xD8C4C4, 0x8A2F3F, 0x9A7A80, 0xFFFFFF, 0x8A2F3F, 0 },
+	{ "Hot Dog Stand", 0xFFFF00, 0xFF0000, 0xC00000, 0xFFFFFF, 0xFF0000, 0 },
+};
+
+const struct scheme *wm_schemes(int *n)
+{
+	*n = (int)NELEM(schemes);
+	return schemes;
+}
 
 struct wm;
 struct win;
@@ -123,6 +143,10 @@ struct win {
 	struct progman *pm;
 	struct files *fm;
 	struct dialog *dlg;
+	struct form *form;
+	int resizable;
+	int maximized;
+	struct rect restore;	/* frame before maximizing */
 	struct task *owner;	/* canvas windows: the task drawing in it */
 	struct evq events;
 	int last_key, last_x, last_y;
@@ -146,7 +170,19 @@ struct wm {
 	struct win *progman;
 	char title[48];
 	uint32_t desktop;	/* this desktop's own colour */
+	struct win *resizing;	/* border being dragged */
+	int rs_edges;		/* 1 left 2 right 4 top 8 bottom */
+	struct rect rs_orig, ghost;
+	int rs_mx, rs_my;
+	int ptr;		/* pointer shape: 0 arrow, else resize edges */
+	struct win *capture;	/* a form slider being dragged */
+	struct wm *next_wm;
 };
+
+static struct wm *all_wms;	/* every running desktop, for settings changes */
+static void form_free(struct form *f);
+static int win_can_resize(struct win *w);
+static void win_resize(struct win *w, int x, int y, int fw, int fh);
 
 static struct termwin *zombies;
 static int mirror_terms = 1;	/* copy terminal window text to COM1 (tests) */
@@ -217,8 +253,11 @@ static void tw_scroll(struct termwin *t)
 	for (int y = 0; y < s->h - FONT_H; y++)
 		memcpy(s->px + (size_t)y * (size_t)s->pitch, s->px + (size_t)(y + FONT_H) * (size_t)s->pitch,
 		    (size_t)s->w * 4);
-	for (int c = 0; c < t->cols; c++)
+	for (int c = 0; c < t->cols; c++) {
 		tw_cell(t, c, t->rows - 1);
+		if (t->rows > 1)
+			tw_cell(t, c, t->rows - 2);	/* the old bottom row: no stale cursor */
+	}
 	win_dirty(t->win, (struct rect){ 0, 0, s->w, s->h });
 }
 
@@ -445,6 +484,13 @@ static void win_destroy(struct wm *wm, struct win *w)
 		surf_free(&w->content);
 		return;	/* canvas wins are freed by their owner via Win_Close */
 	}
+	if (w->form) {
+		if (wm->capture == w)
+			wm->capture = NULL;
+		form_free(w->form);	/* tells its handler if it didn't know */
+	}
+	if (wm->resizing == w)
+		wm->resizing = NULL;
 	if (w->pm)
 		kfree(w->pm);
 	if (w->fm) {
@@ -506,6 +552,7 @@ static struct win *open_term(struct wm *wm, const char *title, const char *cmd, 
 	struct win *w = win_new(wm, W_TERM, title, x, y, cols * FONT_W, rows * FONT_H);
 	if (!w)
 		return NULL;
+	w->resizable = 1;
 	struct termwin *t = kzalloc(sizeof *t);
 	t->grid = kmalloc(sizeof(uint16_t) * (size_t)(cols * rows));
 	if (!t || !t->grid) {
@@ -547,8 +594,22 @@ static struct win *open_term(struct wm *wm, const char *title, const char *cmd, 
 	return w;
 }
 
+int control_open(void *wm, const char *applet);
+void clock_open(struct wm *wm);
+
 static void launch_cmd(struct wm *wm, const char *label, const char *cmd)
 {
+	if (!strncasecmp(cmd, "@control", 8)) {
+		const char *a = cmd + 8;
+		while (*a == ' ')
+			a++;
+		control_open(wm, *a ? a : NULL);
+		return;
+	}
+	if (!strcasecmp(cmd, "@clock")) {
+		clock_open(wm);
+		return;
+	}
 	/* plain commands that bring their own window */
 	if (!strcasecmp(cmd, "@files")) {
 		extern struct win *open_files(struct wm *wm, const char *dir);
@@ -680,13 +741,775 @@ static void dialog_click(struct wm *wm, struct win *w, int x, int y)
 		dialog_finish(wm, w, 2);
 }
 
+/* ---- forms: widget windows (Control Panel and friends) ------------------------------------ */
+
+#define FORM_MAX 64
+
+struct fwidget {
+	int kind, x, y, w, h;
+	char text[64];
+	long val, min, max;
+	const char *const *opts;
+	int nopts;
+	int disabled, hidden, def;
+	uint32_t rgb;
+	char icon[16];
+	char **items;
+	int nitems, top;
+	int typing;		/* spin: digits typed since focus */
+	form_draw_fn draw;
+};
+
+struct form {
+	struct fwidget wd[FORM_MAX];
+	int n;
+	int focus;
+	form_fn fn;
+	void *priv;
+	struct win *win;
+	struct wm *wm;
+	int cw, ch;
+	int min_w, min_h;
+	int closing, dead;
+	int tick_ms;
+	uint64_t next_tick;
+	int px, py;		/* last click, relative to the widget */
+	int drag;		/* slider being dragged, -1 none */
+	char title[64];
+};
+
+static void render_form(struct win *w);
+
+static int wm_focus_is(struct win *w)
+{
+	return w->wm && w->wm->focus == w;
+}
+
+struct form *form_new(const char *title, int w, int h, form_fn fn, void *priv)
+{
+	struct form *f = kzalloc(sizeof *f);
+	if (!f)
+		return NULL;
+	strncpy0(f->title, title, sizeof f->title);
+	f->cw = w;
+	f->ch = h;
+	f->fn = fn;
+	f->priv = priv;
+	f->focus = -1;
+	f->drag = -1;
+	return f;
+}
+
+static int focusable(struct fwidget *d)
+{
+	if (d->disabled || d->hidden)
+		return 0;
+	switch (d->kind) {
+	case FW_BUTTON: case FW_EDIT: case FW_SPIN: case FW_CHOICE: case FW_CHECK:
+	case FW_SLIDER: case FW_ICON: case FW_SWATCH: case FW_LIST:
+		return 1;
+	}
+	return 0;
+}
+
+int form_add(struct form *f, int kind, int x, int y, int w, int h, const char *text)
+{
+	if (!f || f->n >= FORM_MAX)
+		return -1;
+	struct fwidget *d = &f->wd[f->n];
+	memset(d, 0, sizeof *d);
+	d->kind = kind;
+	d->x = x;
+	d->y = y;
+	d->w = w;
+	d->h = h;
+	d->max = 100;
+	if (text)
+		strncpy0(d->text, text, sizeof d->text);
+	if (f->focus < 0 && focusable(d))
+		f->focus = f->n;
+	return f->n++;
+}
+
+static struct fwidget *W(struct form *f, int id)
+{
+	static struct fwidget dummy;
+	if (!f || id < 0 || id >= f->n)
+		return &dummy;
+	return &f->wd[id];
+}
+
+void form_range(struct form *f, int id, long min, long max)
+{
+	struct fwidget *d = W(f, id);
+	d->min = min;
+	d->max = max;
+	d->val = MAX(min, MIN(d->val, max));
+}
+
+void form_options(struct form *f, int id, const char *const *opts, int n)
+{
+	struct fwidget *d = W(f, id);
+	d->opts = opts;
+	d->nopts = n;
+	d->min = 0;
+	d->max = n - 1;
+}
+
+void form_icon(struct form *f, int id, const char *icon) { strncpy0(W(f, id)->icon, icon, 16); }
+void form_custom(struct form *f, int id, form_draw_fn draw) { W(f, id)->draw = draw; }
+void form_default(struct form *f, int id) { W(f, id)->def = 1; }
+int form_focused(struct form *f) { return f->focus; }
+void form_enable(struct form *f, int id, int on) { W(f, id)->disabled = !on; }
+void form_hide(struct form *f, int id, int hidden) { W(f, id)->hidden = hidden; }
+void form_focus(struct form *f, int id) { if (focusable(W(f, id))) f->focus = id; }
+long form_val(struct form *f, int id) { return W(f, id)->val; }
+const char *form_text(struct form *f, int id) { return W(f, id)->text; }
+void form_set_rgb(struct form *f, int id, uint32_t rgb) { W(f, id)->rgb = rgb; }
+uint32_t form_rgb(struct form *f, int id) { return W(f, id)->rgb; }
+void *form_priv(struct form *f) { return f->priv; }
+struct wm *form_wm(struct form *f) { return f->wm; }
+void form_point(struct form *f, int *x, int *y) { *x = f->px; *y = f->py; }
+
+void form_move(struct form *f, int id, int x, int y, int w, int h)
+{
+	struct fwidget *d = W(f, id);
+	d->x = x;
+	d->y = y;
+	d->w = w;
+	d->h = h;
+}
+
+void form_set_val(struct form *f, int id, long v)
+{
+	struct fwidget *d = W(f, id);
+	if (d->kind == FW_SPIN || d->kind == FW_SLIDER || d->kind == FW_CHOICE)
+		v = MAX(d->min, MIN(v, d->max));
+	d->val = v;
+}
+
+void form_set_text(struct form *f, int id, const char *text)
+{
+	strncpy0(W(f, id)->text, text, sizeof f->wd[0].text);
+}
+
+void form_list_clear(struct form *f, int id)
+{
+	struct fwidget *d = W(f, id);
+	for (int i = 0; i < d->nitems; i++)
+		kfree(d->items[i]);
+	kfree(d->items);
+	d->items = NULL;
+	d->nitems = 0;
+	d->val = 0;
+	d->top = 0;
+}
+
+void form_list_add(struct form *f, int id, const char *line)
+{
+	struct fwidget *d = W(f, id);
+	char **n = krealloc(d->items, sizeof(char *) * (size_t)(d->nitems + 1));
+	if (!n)
+		return;
+	d->items = n;
+	d->items[d->nitems++] = kstrdup(line);
+}
+
+void form_tick(struct form *f, int ms)
+{
+	f->tick_ms = ms;
+	f->next_tick = uptime_ms() + (uint64_t)ms;
+}
+
+void form_resizable(struct form *f, int min_w, int min_h)
+{
+	f->min_w = min_w;
+	f->min_h = min_h;
+	if (f->win)
+		f->win->resizable = 1;
+}
+
+void form_size(struct form *f, int *w, int *h)
+{
+	*w = f->win ? f->win->content.w : f->cw;
+	*h = f->win ? f->win->content.h : f->ch;
+}
+
+void form_title(struct form *f, const char *title)
+{
+	strncpy0(f->title, title, sizeof f->title);
+	if (f->win) {
+		strncpy0(f->win->title, title, sizeof f->win->title);
+		win_dirty_all(f->win);
+	}
+}
+
+void form_redraw(struct form *f)
+{
+	if (f->win && !f->dead)
+		render_form(f->win);
+}
+
+int form_show(struct wm *wm, struct form *f, int x, int y)
+{
+	int sw = wm->disp->surf->w, sh = wm->disp->surf->h;
+	if (x < 0)
+		x = (sw - FRAME_W(f->cw)) / 2 + (wm->next_id % 5) * 16;
+	if (y < 0)
+		y = (sh - FRAME_H(f->ch)) / 3 + (wm->next_id % 5) * 16;
+	struct win *w = win_new(wm, W_FORM, f->title, x, y, f->cw, f->ch);
+	if (!w) {
+		form_list_clear(f, 0);
+		kfree(f);
+		return -1;
+	}
+	w->form = f;
+	w->resizable = f->min_w > 0;
+	f->win = w;
+	f->wm = wm;
+	render_form(w);
+	return 0;
+}
+
+struct form *form_find(struct wm *wm, const char *title)
+{
+	for (struct win *w = wm->wins; w; w = w->next)
+		if (w->form && !w->form->closing && !strcasecmp(w->form->title, title))
+			return w->form;
+	return NULL;
+}
+
+void form_raise(struct form *f)
+{
+	if (f->win)
+		raise_win(f->wm, f->win);
+}
+
+void form_close(struct form *f)
+{
+	f->closing = 1;
+}
+
+static void form_free(struct form *f)
+{
+	f->dead = 1;
+	if (f->fn) {	/* closed from outside (Alt+Q, desktop exit): tell it */
+		form_fn fn = f->fn;
+		f->fn = NULL;
+		fn(f, -1, FE_CLOSE);
+	}
+	for (int i = 0; i < f->n; i++)
+		if (f->wd[i].items) {
+			for (int k = 0; k < f->wd[i].nitems; k++)
+				kfree(f->wd[i].items[k]);
+			kfree(f->wd[i].items);
+		}
+	kfree(f);
+}
+
+static void form_emit(struct form *f, int id, int ev)
+{
+	if (f->fn && !f->dead)
+		f->fn(f, id, ev);
+}
+
+/* after every event: re-render, and take the window down if asked */
+static void form_settle(struct form *f)
+{
+	if (f->dead)
+		return;
+	if (f->closing) {
+		f->dead = 1;
+		if (f->fn)
+			f->fn(f, -1, FE_CLOSE);
+		f->fn = NULL;
+		if (f->win)
+			win_destroy(f->wm, f->win);	/* frees f */
+		return;
+	}
+	render_form(f->win);
+}
+
+/* ---- drawing ---- */
+
+static void sunken(struct surface *s, int x, int y, int w, int h, uint32_t bg)
+{
+	fill(s, x, y, w, h, P(bg));
+	bevel(s, x, y, w, h, 0);
+}
+
+static void arrow_glyph(struct surface *s, int cx, int cy, int dir, uint32_t c)
+{
+	/* a small solid triangle: 0 up 1 down 2 left 3 right */
+	for (int i = 0; i < 4; i++) {
+		switch (dir) {
+		case 0: hline(s, cx - i, cy - 2 + i, 2 * i + 1, c); break;
+		case 1: hline(s, cx - i, cy + 2 - i, 2 * i + 1, c); break;
+		case 2: vline(s, cx - 2 + i, cy - i, 2 * i + 1, c); break;
+		case 3: vline(s, cx + 2 - i, cy - i, 2 * i + 1, c); break;
+		}
+	}
+}
+
+static void small_button(struct surface *s, int x, int y, int w, int h, int dir)
+{
+	fill(s, x, y, w, h, P(theme.face));
+	bevel(s, x, y, w, h, 1);
+	arrow_glyph(s, x + w / 2, y + h / 2, dir, P(0));
+}
+
+static void focus_rect(struct surface *s, int x, int y, int w, int h)
+{
+	for (int i = 0; i < w; i += 2) {
+		plot(s, x + i, y, P(0));
+		plot(s, x + i, y + h - 1, P(0));
+	}
+	for (int i = 0; i < h; i += 2) {
+		plot(s, x, y + i, P(0));
+		plot(s, x + w - 1, y + i, P(0));
+	}
+}
+
+static int slider_thumb_x(struct fwidget *d)
+{
+	long span = MAX(1, d->max - d->min);
+	return d->x + 6 + (int)((d->val - d->min) * (d->w - 12) / span);
+}
+
+static void render_widget(struct form *f, int i)
+{
+	struct surface *s = &f->win->content;
+	struct fwidget *d = &f->wd[i];
+	if (d->hidden)
+		return;
+	int foc = i == f->focus && wm_focus_is(f->win);
+	uint32_t ink = P(d->disabled ? 0x808080 : 0);
+	char buf[80];
+	switch (d->kind) {
+	case FW_LABEL:
+		text(s, d->x, d->y, d->text, ink);
+		break;
+	case FW_GROUP: {
+		int ty = d->y + 7;
+		outline(s, d->x, ty, d->w, d->h - 7, P(0x808080));
+		outline(s, d->x + 1, ty + 1, d->w, d->h - 7, P(0xFFFFFF));
+		if (d->text[0]) {
+			int tw = (int)strlen(d->text) * FONT_W;
+			fill(s, d->x + 8, d->y, tw + 6, FONT_H, P(theme.face));
+			text(s, d->x + 11, d->y, d->text, P(0));
+		}
+		break;
+	}
+	case FW_BUTTON: {
+		fill(s, d->x, d->y, d->w, d->h, P(theme.face));
+		bevel(s, d->x, d->y, d->w, d->h, 1);
+		if (d->def || foc)
+			outline(s, d->x - 1, d->y - 1, d->w + 2, d->h + 2, P(0));
+		int tw = (int)strlen(d->text) * FONT_W;
+		text(s, d->x + (d->w - tw) / 2, d->y + (d->h - FONT_H) / 2, d->text, ink);
+		if (foc)
+			focus_rect(s, d->x + 4, d->y + 3, d->w - 8, d->h - 6);
+		break;
+	}
+	case FW_EDIT:
+		sunken(s, d->x, d->y, d->w, d->h, d->disabled ? theme.face : 0xFFFFFF);
+		text(s, d->x + 4, d->y + (d->h - FONT_H) / 2, d->text, ink);
+		if (foc)
+			fill(s, d->x + 4 + (int)strlen(d->text) * FONT_W, d->y + 3, 2, d->h - 6, P(0));
+		break;
+	case FW_SPIN: {
+		int bw = 16;
+		sunken(s, d->x, d->y, d->w - bw, d->h, 0xFFFFFF);
+		snprintf(buf, sizeof buf, d->text[0] == '0' ? "%02ld" : "%ld", d->val);	/* text "0" = zero-pad */
+		if (foc)
+			fill(s, d->x + 3, d->y + 3, (int)strlen(buf) * FONT_W + 2, d->h - 6, P(theme.select));
+		text(s, d->x + 4, d->y + (d->h - FONT_H) / 2, buf, foc ? P(0xFFFFFF) : ink);
+		small_button(s, d->x + d->w - bw, d->y, bw, d->h / 2, 0);
+		small_button(s, d->x + d->w - bw, d->y + d->h / 2, bw, d->h - d->h / 2, 1);
+		break;
+	}
+	case FW_CHOICE: {
+		int bw = 18;
+		small_button(s, d->x, d->y, bw, d->h, 2);
+		small_button(s, d->x + d->w - bw, d->y, bw, d->h, 3);
+		sunken(s, d->x + bw, d->y, d->w - 2 * bw, d->h, 0xFFFFFF);
+		const char *o = d->val >= 0 && d->val < d->nopts ? d->opts[d->val] : "";
+		int tw = (int)strlen(o) * FONT_W;
+		int tx = d->x + (d->w - tw) / 2;
+		if (foc)
+			fill(s, tx - 2, d->y + 3, tw + 4, d->h - 6, P(theme.select));
+		text(s, tx, d->y + (d->h - FONT_H) / 2, o, foc ? P(0xFFFFFF) : ink);
+		break;
+	}
+	case FW_CHECK: {
+		int by = d->y + (d->h - 13) / 2;
+		sunken(s, d->x, by, 13, 13, 0xFFFFFF);
+		if (d->val) {
+			line(s, d->x + 3, by + 3, d->x + 9, by + 9, P(0));
+			line(s, d->x + 9, by + 3, d->x + 3, by + 9, P(0));
+			line(s, d->x + 4, by + 3, d->x + 9, by + 8, P(0));
+			line(s, d->x + 8, by + 3, d->x + 3, by + 8, P(0));
+		}
+		text(s, d->x + 20, d->y + (d->h - FONT_H) / 2, d->text, ink);
+		if (foc)
+			focus_rect(s, d->x + 18, d->y + (d->h - FONT_H) / 2 - 1,
+			    (int)strlen(d->text) * FONT_W + 4, FONT_H + 2);
+		break;
+	}
+	case FW_SLIDER: {
+		int cy = d->y + d->h / 2;
+		sunken(s, d->x + 4, cy - 2, d->w - 8, 4, 0x808080);
+		long span = MAX(1, d->max - d->min);
+		for (long v = d->min; v <= d->max && span <= 40; v++) {
+			int tx = d->x + 6 + (int)((v - d->min) * (d->w - 12) / span);
+			vline(s, tx, d->y + d->h - 4, 4, P(0x606060));
+		}
+		int tx = slider_thumb_x(d);
+		fill(s, tx - 5, d->y + 2, 11, d->h - 8, P(theme.face));
+		bevel(s, tx - 5, d->y + 2, 11, d->h - 8, 1);
+		if (foc)
+			focus_rect(s, d->x, d->y, d->w, d->h);
+		break;
+	}
+	case FW_ICON: {
+		draw_icon(s, d->x + (d->w - 32) / 2, d->y + 2, d->icon);
+		int tw = (int)strlen(d->text) * FONT_W;
+		int tx = d->x + (d->w - tw) / 2, ty = d->y + 38;
+		if (foc)
+			fill(s, tx - 2, ty, tw + 4, FONT_H, P(theme.select));
+		text(s, tx, ty, d->text, foc ? P(0xFFFFFF) : P(0));
+		break;
+	}
+	case FW_SWATCH:
+		if (d->val)
+			fill(s, d->x - 3, d->y - 3, d->w + 6, d->h + 6, P(0));
+		fill(s, d->x, d->y, d->w, d->h, P(d->rgb));
+		bevel(s, d->x, d->y, d->w, d->h, 0);
+		if (foc)
+			focus_rect(s, d->x - 5, d->y - 5, d->w + 10, d->h + 10);
+		break;
+	case FW_LIST: {
+		sunken(s, d->x, d->y, d->w, d->h, 0xFFFFFF);
+		int rows = MAX(1, (d->h - 4) / 18);
+		if (d->val < d->top)
+			d->top = (int)d->val;
+		if (d->val >= d->top + rows)
+			d->top = (int)d->val - rows + 1;
+		struct rect save = s->clip;
+		surf_clip(s, (struct rect){ d->x + 2, d->y + 2, d->w - 4, d->h - 4 });
+		for (int k = d->top; k < d->nitems && k < d->top + rows; k++) {
+			int ry = d->y + 2 + (k - d->top) * 18;
+			int sel = k == d->val;
+			if (sel)
+				fill(s, d->x + 2, ry, d->w - 4, 18, P(foc ? theme.select : 0xC0C0C0));
+			text(s, d->x + 6, ry + 1, d->items[k], P(sel && foc ? 0xFFFFFF : 0));
+		}
+		s->clip = save;
+		if (!d->nitems && d->text[0])
+			text(s, d->x + 6, d->y + 4, d->text, P(0x808080));
+		break;
+	}
+	case FW_CUSTOM:
+		if (d->draw) {
+			struct rect save = s->clip;
+			surf_clip(s, (struct rect){ d->x, d->y, d->w, d->h });
+			d->draw(f, i, s, (struct rect){ d->x, d->y, d->w, d->h });
+			s->clip = save;
+		}
+		break;
+	}
+}
+
+static void render_form(struct win *w)
+{
+	struct form *f = w->form;
+	if (!f || f->dead)
+		return;
+	struct surface *s = &w->content;
+	fill(s, 0, 0, s->w, s->h, P(theme.face));
+	for (int i = 0; i < f->n; i++)
+		render_widget(f, i);
+	win_dirty_all(w);
+}
+
+/* ---- input ---- */
+
+static void form_step(struct form *f, int i, long delta)
+{
+	struct fwidget *d = &f->wd[i];
+	long v = d->val + delta;
+	if (d->kind == FW_CHOICE) {	/* wraps around */
+		if (v < 0)
+			v = d->nopts - 1;
+		if (v >= d->nopts)
+			v = 0;
+	}
+	v = MAX(d->min, MIN(v, d->max));
+	if (v != d->val) {
+		d->val = v;
+		form_emit(f, i, FE_CHANGE);
+	}
+}
+
+static void form_next_focus(struct form *f, int dir)
+{
+	for (int k = 1; k <= f->n; k++) {
+		int i = ((f->focus < 0 ? 0 : f->focus) + dir * k + f->n * 2) % f->n;
+		if (focusable(&f->wd[i])) {
+			f->focus = i;
+			f->wd[i].typing = 0;
+			return;
+		}
+	}
+}
+
+/* arrow keys between icons: the nearest icon in that direction */
+static void form_icon_move(struct form *f, int dx, int dy)
+{
+	struct fwidget *c = &f->wd[f->focus];
+	int best = -1, bestd = 1 << 30;
+	for (int i = 0; i < f->n; i++) {
+		struct fwidget *d = &f->wd[i];
+		if (i == f->focus || d->kind != FW_ICON || !focusable(d))
+			continue;
+		int ex = d->x - c->x, ey = d->y - c->y;
+		if ((dx && (ex * dx <= 0)) || (dy && (ey * dy <= 0)))
+			continue;
+		int dist = (dx ? ex * dx : ey * dy) * 4 + (dx ? (ey < 0 ? -ey : ey) : (ex < 0 ? -ex : ex)) * 8;
+		if (dist < bestd) {
+			bestd = dist;
+			best = i;
+		}
+	}
+	if (best >= 0)
+		f->focus = best;
+}
+
+static void form_key(struct wm *wm, struct win *w, int k)
+{
+	(void)wm;
+	struct form *f = w->form;
+	if (!f || f->dead)
+		return;
+	struct fwidget *d = f->focus >= 0 ? &f->wd[f->focus] : NULL;
+	if (k == 27) {
+		form_close(f);
+	} else if (k == '\t') {
+		form_next_focus(f, 1);
+	} else if (k == KEY_SHIFT_TAB) {
+		form_next_focus(f, -1);
+	} else if (d && d->kind == FW_EDIT && k == '\b') {
+		size_t l = strlen(d->text);
+		if (l) {
+			d->text[l - 1] = 0;
+			form_emit(f, f->focus, FE_CHANGE);
+		}
+	} else if (d && d->kind == FW_EDIT && k >= 0x20 && k < 0x7F) {
+		size_t l = strlen(d->text);
+		if (l + 1 < sizeof d->text && (int)(l + 1) * FONT_W < d->w - 8) {
+			d->text[l] = (char)k;
+			d->text[l + 1] = 0;
+			form_emit(f, f->focus, FE_CHANGE);
+		}
+	} else if (d && d->kind == FW_SPIN && k >= '0' && k <= '9') {
+		long v = d->typing ? d->val * 10 + (k - '0') : (k - '0');
+		if (v > d->max)
+			v = k - '0';
+		d->typing = 1;
+		d->val = v;		/* clamped when focus leaves or Enter */
+		form_emit(f, f->focus, FE_CHANGE);
+	} else if (d && (d->kind == FW_SPIN || d->kind == FW_SLIDER || d->kind == FW_CHOICE) &&
+	    (k == KEY_UP || k == KEY_DOWN || k == KEY_LEFT || k == KEY_RIGHT || k == KEY_PGUP || k == KEY_PGDN)) {
+		long step = (k == KEY_PGUP || k == KEY_PGDN) ? 10 : 1;
+		int up = k == KEY_UP || k == KEY_RIGHT || k == KEY_PGUP;
+		if (d->kind == FW_CHOICE && (k == KEY_UP || k == KEY_DOWN))
+			form_next_focus(f, k == KEY_DOWN ? 1 : -1);
+		else
+			form_step(f, f->focus, up ? step : -step);
+	} else if (d && d->kind == FW_LIST && (k == KEY_UP || k == KEY_DOWN)) {
+		long v = d->val + (k == KEY_DOWN ? 1 : -1);
+		if (v >= 0 && v < d->nitems) {
+			d->val = v;
+			form_emit(f, f->focus, FE_CHANGE);
+		}
+	} else if (d && d->kind == FW_ICON && (k == KEY_UP || k == KEY_DOWN || k == KEY_LEFT || k == KEY_RIGHT)) {
+		form_icon_move(f, k == KEY_LEFT ? -1 : k == KEY_RIGHT ? 1 : 0, k == KEY_UP ? -1 : k == KEY_DOWN ? 1 : 0);
+	} else if (k == KEY_UP || k == KEY_LEFT) {
+		form_next_focus(f, -1);
+	} else if (k == KEY_DOWN || k == KEY_RIGHT) {
+		form_next_focus(f, 1);
+	} else if (k == ' ' && d && d->kind == FW_CHECK) {
+		d->val = !d->val;
+		form_emit(f, f->focus, FE_CHANGE);
+	} else if (k == ' ' && d && (d->kind == FW_BUTTON || d->kind == FW_SWATCH)) {
+		form_emit(f, f->focus, FE_CLICK);
+	} else if (k == '\n') {
+		if (d && d->kind == FW_SPIN) {
+			d->val = MAX(d->min, MIN(d->val, d->max));
+			d->typing = 0;
+		}
+		if (d && (d->kind == FW_BUTTON || d->kind == FW_SWATCH)) {
+			form_emit(f, f->focus, FE_CLICK);
+		} else if (d && (d->kind == FW_ICON || d->kind == FW_LIST)) {
+			form_emit(f, f->focus, FE_DBLCLICK);
+		} else {
+			for (int i = 0; i < f->n; i++)
+				if (f->wd[i].def && !f->wd[i].disabled) {
+					form_emit(f, i, FE_CLICK);
+					break;
+				}
+		}
+	}
+	if (d && f->focus >= 0 && d != &f->wd[f->focus] && d->kind == FW_SPIN) {
+		d->val = MAX(d->min, MIN(d->val, d->max));	/* left a spin: tidy what was typed */
+		d->typing = 0;
+	}
+	form_settle(f);
+}
+
+static void slider_set_from_x(struct form *f, int i, int x)
+{
+	struct fwidget *d = &f->wd[i];
+	long span = MAX(1, d->max - d->min);
+	long v = d->min + ((long)(x - d->x - 6) * span + (d->w - 12) / 2) / MAX(1, d->w - 12);
+	v = MAX(d->min, MIN(v, d->max));
+	if (v != d->val) {
+		d->val = v;
+		form_emit(f, i, FE_CHANGE);
+	}
+}
+
+static void form_click(struct wm *wm, struct win *w, int x, int y, int dbl)
+{
+	struct form *f = w->form;
+	if (!f || f->dead)
+		return;
+	int hit = -1;
+	for (int i = 0; i < f->n; i++) {
+		struct fwidget *d = &f->wd[i];
+		if (d->hidden || d->kind == FW_LABEL || d->kind == FW_GROUP)
+			continue;
+		int pad = d->kind == FW_SWATCH ? 3 : 0;
+		if (x >= d->x - pad && x < d->x + d->w + pad && y >= d->y - pad && y < d->y + d->h + pad)
+			hit = i;
+	}
+	if (hit < 0 || f->wd[hit].disabled) {
+		form_settle(f);
+		return;
+	}
+	struct fwidget *d = &f->wd[hit];
+	if (f->focus >= 0 && f->focus != hit && f->wd[f->focus].kind == FW_SPIN) {
+		struct fwidget *o = &f->wd[f->focus];
+		o->val = MAX(o->min, MIN(o->val, o->max));
+		o->typing = 0;
+	}
+	if (focusable(d))
+		f->focus = hit;
+	f->px = x - d->x;
+	f->py = y - d->y;
+	switch (d->kind) {
+	case FW_BUTTON:
+	case FW_SWATCH:
+		form_emit(f, hit, FE_CLICK);
+		break;
+	case FW_CHECK:
+		d->val = !d->val;
+		form_emit(f, hit, FE_CHANGE);
+		break;
+	case FW_SPIN:
+		d->typing = 0;
+		if (f->px >= d->w - 16)
+			form_step(f, hit, f->py < d->h / 2 ? 1 : -1);
+		break;
+	case FW_CHOICE:
+		if (f->px < 18)
+			form_step(f, hit, -1);
+		else if (f->px >= d->w - 18)
+			form_step(f, hit, 1);
+		break;
+	case FW_SLIDER:
+		slider_set_from_x(f, hit, x);
+		f->drag = hit;
+		wm->capture = w;
+		break;
+	case FW_ICON:
+		form_emit(f, hit, dbl ? FE_DBLCLICK : FE_CLICK);
+		break;
+	case FW_LIST: {
+		int row = d->top + (f->py - 2) / 18;
+		if (row >= 0 && row < d->nitems) {
+			if (row != d->val) {
+				d->val = row;
+				form_emit(f, hit, FE_CHANGE);
+			}
+			if (dbl)
+				form_emit(f, hit, FE_DBLCLICK);
+		}
+		break;
+	}
+	case FW_CUSTOM:
+		form_emit(f, hit, dbl ? FE_DBLCLICK : FE_CLICK);
+		break;
+	}
+	form_settle(f);
+}
+
+static void form_drag(struct win *w, int x, int y)
+{
+	(void)y;
+	struct form *f = w->form;
+	if (!f || f->dead || f->drag < 0)
+		return;
+	slider_set_from_x(f, f->drag, x);
+	form_settle(f);
+}
+
+static void form_tick_all(struct wm *wm)
+{
+	uint64_t now = uptime_ms();
+	for (struct win *w = wm->wins; w; ) {
+		struct win *next = w->next;
+		struct form *f = w->form;
+		if (f && !f->dead && f->tick_ms && now >= f->next_tick) {
+			f->next_tick = now + (uint64_t)f->tick_ms;
+			form_emit(f, -1, FE_TICK);
+			form_settle(f);
+		}
+		w = next;
+	}
+}
+
+/* ---- for applets: desktop services ---- */
+
+void wm_launch(struct wm *wm, const char *label, const char *cmd) { launch_cmd(wm, label, cmd); }
+int wm_depth(struct wm *wm) { return wm->depth; }
+uint32_t wm_desktop_colour(struct wm *wm) { return wm->desktop; }
+
+void wm_set_desktop_colour(struct wm *wm, uint32_t rgb)
+{
+	wm->desktop = rgb & 0xFFFFFF;
+	wm_dirty(wm, (struct rect){ 0, 0, wm->disp->surf->w, wm->disp->surf->h });
+}
+
+void wm_message(struct wm *wm, const char *title, const char *msg)
+{
+	struct win *w = open_dialog(wm, title, msg, 0, 0);
+	if (w)
+		render_dialog(w);
+}
+
+uint32_t ui_colour(int which)
+{
+	return which == 0 ? theme.face : which == 1 ? theme.active : theme.select;
+}
+
 /* ---- Program Manager ------------------------------------------------------------------ */
 
 static const char *const menu_names[] = { "File", "Options", "Window", "Help" };
 static const char *const menu_items[4][5] = {
 	{ "New Shell", "Run...", "File Manager", "Exit Desktop", NULL },
-	{ "Desktop: Teal", "Desktop: Night", "Desktop: Plum", "Desktop: Slate", NULL },
-	{ "Tile", "Cascade", "Next Window", NULL, NULL },
+	{ "Control Panel", "Desktop...", "Colours...", "Date & Time...", NULL },
+	{ "Tile", "Cascade", "Next Window", "Clock", NULL },
 	{ "About bdos", "Keyboard", NULL, NULL, NULL },
 };
 
@@ -701,6 +1524,10 @@ static const char *guess_icon(const char *cmd)
 		return "network";
 	if (!strcasecmp(cmd, "@files"))
 		return "folder";
+	if (!strncasecmp(cmd, "@control", 8))
+		return "control";
+	if (!strcasecmp(cmd, "@clock"))
+		return "clock";
 	if (dot && !strncasecmp(dot, ".BAS", 4))
 		return "basic";
 	if (!strncasecmp(cmd, "BASIC", 5))
@@ -943,9 +1770,15 @@ static void tile(struct wm *wm, int cascade)
 			w->x = 20 + i * 26;
 			w->y = 20 + i * 26;
 		} else {
-			int cols = n > 1 ? 2 : 1;
+			int cols = n > 1 ? 2 : 1, rws = (n + cols - 1) / cols;
 			w->x = (i % cols) * (sw / cols);
-			w->y = (i / cols) * (sh / ((n + cols - 1) / cols));
+			w->y = (i / cols) * (sh / rws);
+			if (win_can_resize(w)) {
+				w->maximized = 0;
+				win_resize(w, w->x, w->y, sw / cols, sh / rws);
+				i++;
+				continue;
+			}
 		}
 		w->x = MIN(w->x, sw - 60);
 		w->y = MIN(w->y, sh - 40);
@@ -963,7 +1796,6 @@ static void next_window(struct wm *wm)
 
 static void menu_pick(struct wm *wm, int m, int i)
 {
-	static const uint32_t colours[] = { 0x2F6F73, 0x3A3A6E, 0x5B3F72, 0x404850 };
 	switch (m * 10 + i) {
 	case 0: open_term(wm, "Shell", NULL, 80, 25, -1, -1); break;
 	case 1: open_dialog(wm, "Run", "Command line:", 1, 1); break;
@@ -972,10 +1804,11 @@ static void menu_pick(struct wm *wm, int m, int i)
 		open_dialog(wm, "Exit Desktop",
 		    wm->depth ? "Leave this nested desktop?" : "Leave the desktop and go back to DOS?", 0, 2);
 		break;
-	case 10: case 11: case 12: case 13:
-		wm->desktop = colours[i];
-		wm_dirty(wm, (struct rect){ 0, 0, wm->disp->surf->w, wm->disp->surf->h });
-		break;
+	case 10: control_open(wm, NULL); break;
+	case 11: control_open(wm, "desktop"); break;
+	case 12: control_open(wm, "colors"); break;
+	case 13: control_open(wm, "date"); break;
+	case 23: clock_open(wm); break;
 	case 20: tile(wm, 0); break;
 	case 21: tile(wm, 1); break;
 	case 22: next_window(wm); break;
@@ -1093,6 +1926,7 @@ static struct win *open_progman(struct wm *wm)
 		return NULL;
 	}
 	w->pm = pm;
+	w->resizable = 1;
 	pm_layout(w);
 	render_progman(w);
 	wm->progman = w;
@@ -1228,6 +2062,7 @@ struct win *open_files(struct wm *wm, const char *dir)
 		return NULL;
 	}
 	w->fm = f;
+	w->resizable = 1;
 	render_files(w);
 	return w;
 }
@@ -1265,6 +2100,180 @@ static void fm_click(struct wm *wm, struct win *w, int x, int y, int dbl)
 		fm_open(wm, w);
 }
 
+/* ---- resizing and maximizing ------------------------------------------------------------- */
+
+static int win_min_cw(struct win *w)
+{
+	if (w->kind == W_TERM)
+		return 20 * FONT_W;
+	if (w->form)
+		return MAX(80, w->form->min_w);
+	return 180;
+}
+
+static int win_min_ch(struct win *w)
+{
+	if (w->kind == W_TERM)
+		return 4 * FONT_H;
+	if (w->form)
+		return MAX(40, w->form->min_h);
+	return w->kind == W_PROGMAN ? 120 : 80;
+}
+
+static int win_can_resize(struct win *w)
+{
+	return w->resizable && !(w->term && w->term->child);
+}
+
+/* Give a window a new frame. Terminals snap to whole character cells and
+ * keep the text around the cursor; everything else redraws at the new size. */
+static void win_resize(struct win *w, int x, int y, int fw, int fh)
+{
+	struct wm *wm = w->wm;
+	int cw = MAX(win_min_cw(w), fw - 2 * BORDER);
+	int ch = MAX(win_min_ch(w), fh - 2 * BORDER - TITLE_H);
+	struct termwin *t = w->kind == W_TERM ? w->term : NULL;
+	int cols = 0, rows = 0;
+	if (t) {
+		cols = MIN(cw / FONT_W, 250);
+		rows = MIN(ch / FONT_H, 120);
+		cw = cols * FONT_W;
+		ch = rows * FONT_H;
+	}
+	wm_dirty(wm, frame_rect(w));
+	w->x = x;
+	w->y = MAX(0, y);
+	if (cw == w->content.w && ch == w->content.h) {
+		wm_dirty(wm, frame_rect(w));
+		return;
+	}
+	struct surface ns;
+	if (surf_init(&ns, cw, ch))
+		return;
+	uint16_t *grid = NULL;
+	if (t && !(grid = kmalloc(sizeof(uint16_t) * (size_t)(cols * rows)))) {
+		surf_free(&ns);
+		return;
+	}
+	fill(&ns, 0, 0, cw, ch, P(t ? 0 : 0xFFFFFF));
+	if (w->kind == W_CANVAS)	/* a program's drawing: keep what fits */
+		blit(&ns, 0, 0, &w->content, 0, 0, MIN(cw, w->content.w), MIN(ch, w->content.h));
+	surf_free(&w->content);
+	w->content = ns;
+	w->w = FRAME_W(cw);
+	w->h = FRAME_H(ch);
+	wm_dirty(wm, frame_rect(w));
+	if (t) {
+		for (int i = 0; i < cols * rows; i++)
+			grid[i] = 0x0720;
+		int shift = MAX(0, t->cy - (rows - 1));
+		for (int r = 0; r < rows && r + shift < t->rows; r++)
+			for (int c = 0; c < cols && c < t->cols; c++)
+				grid[r * cols + c] = t->grid[(r + shift) * t->cols + c];
+		kfree(t->grid);
+		t->grid = grid;
+		t->cols = cols;
+		t->rows = rows;
+		t->cy -= shift;
+		t->cx = MIN(t->cx, cols);
+		tw_redraw(t);
+		return;
+	}
+	switch (w->kind) {
+	case W_PROGMAN:
+		pm_layout(w);
+		render_progman(w);
+		break;
+	case W_FILES:
+		render_files(w);
+		break;
+	case W_CANVAS: {
+		struct event e = { EV_RESIZE, cw, ch, 0, 0 };
+		evq_push(&w->events, &e);
+		win_dirty_all(w);
+		break;
+	}
+	case W_FORM:
+		form_emit(w->form, -1, FE_RESIZE);
+		form_settle(w->form);
+		break;
+	}
+}
+
+static void toggle_maximize(struct wm *wm, struct win *w)
+{
+	if (!win_can_resize(w))
+		return;
+	if (w->maximized) {
+		w->maximized = 0;
+		win_resize(w, w->restore.x, w->restore.y, w->restore.w, w->restore.h);
+	} else {
+		w->restore = frame_rect(w);
+		w->maximized = 1;
+		win_resize(w, 0, 0, wm->disp->surf->w, wm->disp->surf->h);
+	}
+}
+
+/* which borders of w are under (x, y): 1 left 2 right 4 top 8 bottom */
+static int edge_at(struct win *w, int x, int y)
+{
+	if (!w || !win_can_resize(w) || w->maximized)
+		return 0;
+	int lx = x - w->x, ly = y - w->y;
+	if (lx < 0 || ly < 0 || lx >= w->w || ly >= w->h)
+		return 0;
+	int e = 0, corner = 18;
+	if (lx < GRIP)
+		e |= 1;
+	else if (lx >= w->w - GRIP)
+		e |= 2;
+	if (ly < GRIP)
+		e |= 4;
+	else if (ly >= w->h - GRIP)
+		e |= 8;
+	if (e & 3) {
+		if (ly < corner)
+			e |= 4;
+		else if (ly >= w->h - corner)
+			e |= 8;
+	}
+	if (e & 12) {
+		if (lx < corner)
+			e |= 1;
+		else if (lx >= w->w - corner)
+			e |= 2;
+	}
+	return e;
+}
+
+static void resize_track(struct wm *wm, int x, int y)
+{
+	struct win *w = wm->resizing;
+	struct rect o = wm->rs_orig, g = o;
+	int dx = x - wm->rs_mx, dy = y - wm->rs_my;
+	int minw = FRAME_W(win_min_cw(w)), minh = FRAME_H(win_min_ch(w));
+	int e = wm->rs_edges;
+	if (e & 1) {
+		g.w = MAX(minw, o.w - dx);
+		g.x = o.x + o.w - g.w;
+	}
+	if (e & 2)
+		g.w = MAX(minw, o.w + dx);
+	if (e & 4) {
+		g.h = MAX(minh, o.h - dy);
+		g.y = o.y + o.h - g.h;
+		if (g.y < 0) {
+			g.h += g.y;
+			g.y = 0;
+		}
+	}
+	if (e & 8)
+		g.h = MAX(minh, o.h + dy);
+	wm_dirty(wm, wm->ghost);
+	wm->ghost = g;
+	wm_dirty(wm, g);
+}
+
 /* ---- composing the screen ---------------------------------------------------------------- */
 
 static const char *const pointer[] = {
@@ -1276,6 +2285,32 @@ static const char *const pointer[] = {
 #define PTR_W 12
 #define PTR_H 18
 
+/* resize pointers: a double-headed arrow through the hot spot */
+static void draw_resize_pointer(struct surface *s, int cx, int cy, int edges)
+{
+	int dx, dy;
+	if ((edges & 3) && !(edges & 12)) { dx = 1; dy = 0; }
+	else if ((edges & 12) && !(edges & 3)) { dx = 0; dy = 1; }
+	else if ((edges & 5) == 5 || (edges & 10) == 10) { dx = 1; dy = 1; }
+	else { dx = 1; dy = -1; }
+	int px[64], py[64], n = 0, L = 7;
+	int qx = -dy, qy = dx;	/* perpendicular */
+	for (int t = -L; t <= L; t++) {
+		px[n] = cx + t * dx;
+		py[n++] = cy + t * dy;
+	}
+	for (int end = -1; end <= 1; end += 2)
+		for (int k = 1; k <= 3; k++)
+			for (int side = -1; side <= 1; side += 2) {
+				px[n] = cx + end * (L - k) * dx + side * k * qx;
+				py[n++] = cy + end * (L - k) * dy + side * k * qy;
+			}
+	for (int i = 0; i < n; i++)
+		fill(s, px[i] - 1, py[i] - 1, 3, 3, P(0xFFFFFF));
+	for (int i = 0; i < n; i++)
+		plot(s, px[i], py[i], P(0));
+}
+
 static void draw_frame(struct surface *s, struct win *w, int active)
 {
 	int x = w->x, y = w->y;
@@ -1284,7 +2319,7 @@ static void draw_frame(struct surface *s, struct win *w, int active)
 	uint32_t tb = P(active ? theme.active : theme.inactive);
 	fill(s, x + BORDER, y + BORDER, w->w - 2 * BORDER, TITLE_H - 2, tb);
 	int tw = (int)strlen(w->title) * FONT_W;
-	int maxw = w->w - 2 * BORDER - 50;
+	int maxw = w->w - 2 * BORDER - (w->resizable ? 70 : 50);
 	char t[64];
 	strncpy0(t, w->title, sizeof t);
 	if (tw > maxw && maxw > 0) {
@@ -1298,6 +2333,29 @@ static void draw_frame(struct surface *s, struct win *w, int active)
 	bevel(s, bx, by, 16, 16, 1);
 	line(s, bx + 4, by + 4, bx + 11, by + 11, P(0));
 	line(s, bx + 11, by + 4, bx + 4, by + 11, P(0));
+	if (win_can_resize(w)) {
+		/* maximize/restore box, and the notches that mark the resize corners */
+		int mx = bx - 18;
+		fill(s, mx, by, 16, 16, P(theme.face));
+		bevel(s, mx, by, 16, 16, 1);
+		if (w->maximized) {
+			arrow_glyph(s, mx + 8, by + 4, 0, P(0));
+			arrow_glyph(s, mx + 8, by + 11, 1, P(0));
+		} else {
+			arrow_glyph(s, mx + 8, by + 7, 0, P(0));
+		}
+		if (!w->maximized) {
+			uint32_t d = P(0x707070);
+			vline(s, x + 18, y, BORDER, d);
+			vline(s, x + w->w - 19, y, BORDER, d);
+			vline(s, x + 18, y + w->h - BORDER, BORDER, d);
+			vline(s, x + w->w - 19, y + w->h - BORDER, BORDER, d);
+			hline(s, x, y + 18, BORDER, d);
+			hline(s, x + w->w - BORDER, y + 18, BORDER, d);
+			hline(s, x, y + w->h - 19, BORDER, d);
+			hline(s, x + w->w - BORDER, y + w->h - 19, BORDER, d);
+		}
+	}
 	/* control-menu box on the left, Windows 3.1 style */
 	int cx = x + BORDER + 2;
 	fill(s, cx, by, 16, 16, P(theme.face));
@@ -1323,13 +2381,22 @@ static void compose(struct wm *wm, struct rect r)
 		draw_frame(s, w, w == wm->focus);
 		blit(s, w->x + CLIENT_X, w->y + CLIENT_Y, &w->content, 0, 0, w->content.w, w->content.h);
 	}
+	if (wm->resizing) {
+		struct rect g = wm->ghost;
+		outline(s, g.x, g.y, g.w, g.h, P(0));
+		outline(s, g.x + 1, g.y + 1, g.w - 2, g.h - 2, P(0xFFFFFF));
+		outline(s, g.x + 2, g.y + 2, g.w - 4, g.h - 4, P(0));
+	}
 	if (wm->disp->draws_pointer) {
-		for (int j = 0; j < PTR_H; j++)
-			for (int i = 0; i < PTR_W; i++) {
-				char c = pointer[j][i];
-				if (c != '.')
-					plot(s, wm->mx + i, wm->my + j, P(c == 'k' ? 0 : 0xFFFFFF));
-			}
+		if (wm->ptr)
+			draw_resize_pointer(s, wm->mx, wm->my, wm->ptr);
+		else
+			for (int j = 0; j < PTR_H; j++)
+				for (int i = 0; i < PTR_W; i++) {
+					char c = pointer[j][i];
+					if (c != '.')
+						plot(s, wm->mx + i, wm->my + j, P(c == 'k' ? 0 : 0xFFFFFF));
+				}
 	}
 	surf_noclip(s);
 	wm->disp->flush(wm->disp, r);
@@ -1400,7 +2467,24 @@ static void handle_key(struct wm *wm, int k)
 	case W_PROGMAN: pm_key(wm, w, k); break;
 	case W_FILES: fm_key(wm, w, k); break;
 	case W_DIALOG: dialog_key(wm, w, k); break;
+	case W_FORM: form_key(wm, w, k); break;
 	default: send_to_window(w, &e); break;
+	}
+}
+
+static struct rect ptr_rect(struct wm *wm)
+{
+	return (struct rect){ wm->mx - 10, wm->my - 10, PTR_W + 12, PTR_H + 12 };
+}
+
+static void update_pointer_shape(struct wm *wm, struct win *w)
+{
+	if (!wm->disp->draws_pointer)
+		return;
+	int shape = wm->resizing ? wm->rs_edges : (wm->drag || wm->capture) ? 0 : edge_at(w, wm->mx, wm->my);
+	if (shape != wm->ptr) {
+		wm->ptr = shape;
+		wm_dirty(wm, ptr_rect(wm));
 	}
 }
 
@@ -1408,14 +2492,41 @@ static void handle_mouse(struct wm *wm, struct event *e)
 {
 	int x = e->x, y = e->y;
 	if (wm->disp->draws_pointer && (x != wm->mx || y != wm->my)) {
-		wm_dirty(wm, (struct rect){ wm->mx, wm->my, PTR_W, PTR_H });
-		wm_dirty(wm, (struct rect){ x, y, PTR_W, PTR_H });
+		wm_dirty(wm, ptr_rect(wm));
+		wm->mx = x;
+		wm->my = y;
+		wm_dirty(wm, ptr_rect(wm));
 	}
 	wm->mx = x;
 	wm->my = y;
 	int down = e->type == EV_DOWN && (e->buttons & 1);
 	wm->buttons = e->buttons;
 
+	if (wm->capture) {	/* a slider follows the mouse until release */
+		struct win *c = wm->capture;
+		if (!(e->buttons & 1)) {
+			if (c->form)
+				c->form->drag = -1;
+			wm->capture = NULL;
+		} else {
+			form_drag(c, x - c->x - CLIENT_X, y - c->y - CLIENT_Y);
+		}
+		return;
+	}
+	if (wm->resizing) {
+		if (!(e->buttons & 1)) {
+			struct win *w = wm->resizing;
+			struct rect g = wm->ghost;
+			wm->resizing = NULL;
+			wm_dirty(wm, g);
+			w->maximized = 0;
+			win_resize(w, g.x, g.y, g.w, g.h);
+			update_pointer_shape(wm, win_at(wm, x, y));
+		} else {
+			resize_track(wm, x, y);
+		}
+		return;
+	}
 	if (wm->drag) {
 		if (!(e->buttons & 1)) {
 			wm->drag = NULL;
@@ -1425,14 +2536,16 @@ static void handle_mouse(struct wm *wm, struct event *e)
 		wm_dirty(wm, frame_rect(w));
 		w->x = x - wm->drag_dx;
 		w->y = MAX(0, y - wm->drag_dy);
+		w->maximized = 0;
 		wm_dirty(wm, frame_rect(w));
 		return;
 	}
 
 	struct win *w = win_at(wm, x, y);
+	update_pointer_shape(wm, w);
 	if (down) {
 		uint64_t now = uptime_ms();
-		int dbl = now - wm->click_ms < DCLICK_MS && x - wm->click_x < 5 &&
+		int dbl = now - wm->click_ms < (uint64_t)DCLICK_MS && x - wm->click_x < 5 &&
 		    wm->click_x - x < 5 && y - wm->click_y < 5 && wm->click_y - y < 5;
 		wm->click_ms = dbl ? 0 : now;
 		wm->click_x = x;
@@ -1442,11 +2555,32 @@ static void handle_mouse(struct wm *wm, struct event *e)
 		if (w != wm->focus || w != topmost(wm))
 			raise_win(wm, w);
 		int lx = x - w->x, ly = y - w->y;
+		int on_bar = ly >= BORDER && ly < CLIENT_Y;
+		if (on_bar && lx >= w->w - BORDER - 18 && lx < w->w - BORDER) {
+			close_request(wm, w);
+			return;
+		}
+		if (on_bar && win_can_resize(w) && lx >= w->w - BORDER - 36 && lx < w->w - BORDER - 20) {
+			toggle_maximize(wm, w);
+			return;
+		}
+		int edges = edge_at(w, x, y);
+		if (edges) {
+			wm->resizing = w;
+			wm->rs_edges = edges;
+			wm->rs_orig = frame_rect(w);
+			wm->ghost = wm->rs_orig;
+			wm->rs_mx = x;
+			wm->rs_my = y;
+			wm->ptr = edges;
+			wm_dirty(wm, wm->ghost);
+			return;
+		}
 		if (ly < CLIENT_Y) {
-			if (lx >= w->w - BORDER - 18 && lx < w->w - BORDER && ly >= BORDER)
-				close_request(wm, w);
-			else if (lx >= BORDER + 2 && lx < BORDER + 18 && ly >= BORDER && dbl)
+			if (lx >= BORDER + 2 && lx < BORDER + 18 && dbl)
 				close_request(wm, w);	/* double-click the control box */
+			else if (dbl && win_can_resize(w))
+				toggle_maximize(wm, w);	/* double-click the title */
 			else {
 				wm->drag = w;
 				wm->drag_dx = x - w->x;
@@ -1459,6 +2593,7 @@ static void handle_mouse(struct wm *wm, struct event *e)
 		case W_PROGMAN: pm_click(wm, w, cx, cy, dbl); return;
 		case W_FILES: fm_click(wm, w, cx, cy, dbl); return;
 		case W_DIALOG: dialog_click(wm, w, cx, cy); return;
+		case W_FORM: form_click(wm, w, cx, cy, dbl); return;
 		}
 	}
 	/* motion and buttons inside canvases and nested desktops */
@@ -1504,6 +2639,7 @@ static void wm_loop(struct wm *wm)
 				handle_mouse(wm, &e);
 		}
 		check_terms(wm);
+		form_tick_all(wm);
 		if (!wm->progman && wm->running)
 			wm->running = 0;	/* Program Manager closed: leave */
 		if (!rect_empty(wm->dirty)) {
@@ -1545,7 +2681,9 @@ int desktop_run_on(struct display *d, const char *title)
 	struct wm *outer = me->desk;
 	wm->depth = outer ? outer->depth + 1 : 0;
 	static const uint32_t level_colours[] = { 0x2F6F73, 0x5B3F72, 0x404850, 0x6E4A2F };
-	wm->desktop = level_colours[wm->depth % 4];
+	wm->desktop = wm->depth ? level_colours[wm->depth % 4] : setting_rgb("desktop.color");
+	wm->next_wm = all_wms;
+	all_wms = wm;
 	void *save_desk = me->desk;
 	me->desk = wm;
 
@@ -1556,6 +2694,11 @@ int desktop_run_on(struct display *d, const char *title)
 	wm_shutdown(wm);
 
 	me->desk = save_desk;
+	for (struct wm **pp = &all_wms; *pp; pp = &(*pp)->next_wm)
+		if (*pp == wm) {
+			*pp = wm->next_wm;
+			break;
+		}
 	kfree(wm);
 	return 0;
 }
@@ -1797,6 +2940,7 @@ static int sys_win_open(int argc, struct sysval *a, struct sysval *r)
 	if (!win)
 		return -3;
 	win->owner = task_current();
+	win->resizable = 1;
 	canvases[slot] = win;
 	r->n = slot + 1;
 	return 0;
@@ -1885,7 +3029,7 @@ static int sys_win_text(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-/* Win_Event id: 0 nothing, 1 key, 2 click, 3 mouse moved, -1 closed */
+/* Win_Event id: 0 nothing, 1 key, 2 click, 3 mouse moved, 4 resized, -1 closed */
 static int sys_win_event(int argc, struct sysval *a, struct sysval *r)
 {
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -1901,6 +3045,10 @@ static int sys_win_event(int argc, struct sysval *a, struct sysval *r)
 		if (e.type == EV_KEY) {
 			w->last_key = e.key;
 			r->n = 1;
+			return 0;
+		}
+		if (e.type == EV_RESIZE) {
+			r->n = 4;
 			return 0;
 		}
 		w->last_x = e.x;
@@ -2014,7 +3162,7 @@ static const struct sys_entry desk_calls[] = {
 	{ "Win_Line", sys_win_line, "Win_Line id,x0,y0,x1,y1,&RRGGBB" },
 	{ "Win_Pixel", sys_win_pixel, "Win_Pixel id,x,y,&RRGGBB" },
 	{ "Win_Text", sys_win_text, "Win_Text id,x,y,text$,&RRGGBB" },
-	{ "Win_Event", sys_win_event, "Win_Event id TO e     - 0 none 1 key 2 click 3 move -1 closed" },
+	{ "Win_Event", sys_win_event, "Win_Event id TO e     - 0 none 1 key 2 click 3 move 4 resized -1 closed" },
 	{ "Win_Key", sys_win_key, "Win_Key id TO k       - last key" },
 	{ "Win_X", sys_win_x, "Win_X id TO x         - last mouse x" },
 	{ "Win_Y", sys_win_y, "Win_Y id TO y         - last mouse y" },
@@ -2129,7 +3277,7 @@ static long desk_read(struct chardev *d, void *buf, size_t n)
 {
 	(void)d;
 	struct wm *wm = my_desk();
-	char info[160];
+	char info[1536];
 	int len;
 	if (!wm)
 		len = snprintf(info, sizeof info, "no desktop\n");
@@ -2139,6 +3287,10 @@ static long desk_read(struct chardev *d, void *buf, size_t n)
 			nw++;
 		len = snprintf(info, sizeof info, "desktop level %d %dx%d windows %d color #%06x\n",
 		    wm->depth, wm->disp->surf->w, wm->disp->surf->h, nw, wm->desktop);
+		/* one line per window, bottom first: id x y w h focus "title" */
+		for (struct win *w = wm->wins; w && len < (int)sizeof info - 100; w = w->next)
+			len += snprintf(info + len, sizeof info - (size_t)len, "window %d %d %d %d %d%s \"%s\"\n",
+			    w->id, w->x, w->y, w->w, w->h, w == wm->focus ? " focus" : "", w->title);
 	}
 	size_t c = MIN(n, (size_t)len);
 	memcpy(buf, info, c);
@@ -2215,8 +3367,55 @@ static struct chardev desk_dev = { "DESK$", desk_read, desk_write, NULL, 1 };
 static struct chardev mouse_dev = { "MOUSE$", mouse_read, NULL, NULL, 1 };
 static struct chardev draw_dev = { "DRAW$", NULL, draw_write, NULL, 0 };
 
+static void apply_scheme(void)
+{
+	const char *name = setting("desktop.scheme");
+	const struct scheme *sc = &schemes[0];
+	for (size_t i = 0; i < NELEM(schemes); i++)
+		if (!strcasecmp(schemes[i].name, name))
+			sc = &schemes[i];
+	theme.face = sc->face;
+	theme.active = sc->active;
+	theme.inactive = sc->inactive;
+	theme.title_text = sc->title_text;
+	theme.select = sc->select;
+}
+
+/* repaint every window of every desktop: the colours changed */
+static void repaint_all(void)
+{
+	for (struct wm *wm = all_wms; wm; wm = wm->next_wm) {
+		for (struct win *w = wm->wins; w; w = w->next) {
+			if (w->pm)
+				render_progman(w);
+			else if (w->fm)
+				render_files(w);
+			else if (w->dlg && !w->closed)
+				render_dialog(w);
+			else if (w->form)
+				render_form(w);
+		}
+		wm_dirty(wm, (struct rect){ 0, 0, wm->disp->surf->w, wm->disp->surf->h });
+	}
+}
+
+static void wm_settings(const char *key)
+{
+	if (!*key || !strcmp(key, "mouse.dclick"))
+		dclick_ms = (int)MAX(150, MIN(1500, setting_int("mouse.dclick")));
+	if (!*key || !strcmp(key, "desktop.scheme")) {
+		apply_scheme();
+		repaint_all();
+	}
+	if (*key && !strcmp(key, "desktop.color"))
+		for (struct wm *wm = all_wms; wm; wm = wm->next_wm)
+			if (!wm->depth)
+				wm_set_desktop_colour(wm, setting_rgb("desktop.color"));
+}
+
 void desktop_init(void)
 {
+	setting_watch(wm_settings);
 	dev_register(&desk_dev);
 	dev_register(&mouse_dev);
 	dev_register(&draw_dev);

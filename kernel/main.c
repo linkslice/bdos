@@ -52,6 +52,9 @@ void kernel_late_init(void)
 {
 	sysapi_init();
 	storage_init();
+	extern void settings_init(void);
+	settings_init();
+	input_settings_init();
 	extern void desktop_init(void);
 	desktop_init();
 	extern void net_init(void), remote_init(void);

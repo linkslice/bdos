@@ -88,6 +88,8 @@ void net_register(struct netif *n)
 }
 
 int net_present(void) { return nif != NULL; }
+const char *net_adapter(void) { return nif ? nif->name : ""; }
+int net_link(void) { return nif && nif->link_up ? nif->link_up(nif) : nif != NULL; }
 const char *net_hostname(void) { return hostname; }
 
 void net_mac(uint8_t mac[6])

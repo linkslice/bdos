@@ -6,3 +6,7 @@
 "File Manager.lnk" order=2
 "Notepad.lnk" order=3
 "BASIC.lnk" order=4
+"Control Panel.lnk" icon=control
+"Control Panel.lnk" order=5
+"Clock.lnk" icon=clock
+"Clock.lnk" order=6

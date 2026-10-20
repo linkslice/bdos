@@ -32,5 +32,7 @@ Things to try:
     NET VIEW             other bdos machines on the network
     CTTY \\BOX2          a shell on one of them (T: is your folder)
     WIN                  the desktop; WIN \\BOX2 for someone else's
+    CONTROL              settings (on the desktop: the Control Panel)
+    DATE, TIME           show or set the clock
 
 More in C:\Docs.

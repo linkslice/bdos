@@ -35,7 +35,7 @@ class VM:
             *extra,
         ])
         self.ser = self._connect(self.ser_path)
-        self.mon = self._connect(self.mon_path)
+        self.monsock = self._connect(self.mon_path)
         self.log = b""
         self.lock = threading.Lock()
         self.alive = True
@@ -109,14 +109,46 @@ class VM:
 
     def keys(self, *names):
         for k in names:
-            self.mon.sendall(f"sendkey {k}\n".encode())
+            self.monsock.sendall(f"sendkey {k}\n".encode())
             time.sleep(0.08)
+
+    # ---- the mouse, through the QEMU monitor (PS/2, 1:1 at the default speed)
+    def mon(self, c):
+        self.monsock.sendall((c + "\n").encode())
+        time.sleep(0.15)
+
+    def windows(self):
+        """{title: (x, y, w, h)} and the pointer, from DESK$ and MOUSE$"""
+        out = self.cmd("type DESK$")
+        wins = {}
+        for m in re.finditer(r'window (\d+) (-?\d+) (-?\d+) (\d+) (\d+)( focus)? "([^"]*)"', out):
+            wins[m.group(7)] = tuple(map(int, m.groups()[1:5]))
+        mp = re.findall(r"\n(\d+) (\d+) (\d+)", self.cmd("type MOUSE$"))[-1]
+        return wins, (int(mp[0]), int(mp[1]))
+
+    def move_to(self, x, y):
+        _, (cx, cy) = self.windows()
+        self.mon(f"mouse_move {x - cx} {y - cy}")
+        time.sleep(0.3)
+
+    def drag(self, x0, y0, x1, y1, steps=4):
+        self.move_to(x0, y0)
+        self.mon("mouse_button 1")
+        for _ in range(steps):
+            self.mon(f"mouse_move {(x1 - x0) // steps} {(y1 - y0) // steps}")
+        self.mon("mouse_button 0")
+        time.sleep(0.5)
+
+    def double_click(self):
+        for b in (1, 0, 1, 0):
+            self.mon(f"mouse_button {b}")
+        time.sleep(0.6)
 
     def screenshot(self, name):
         path = os.path.join(tmp, name + ".ppm")
         if os.path.exists(path):
             os.remove(path)
-        self.mon.sendall(f"screendump {path}\n".encode())
+        self.monsock.sendall(f"screendump {path}\n".encode())
         for _ in range(100):
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 time.sleep(0.3)
@@ -151,7 +183,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.7" in out, out
+    assert "bdos 0.8" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -159,7 +191,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.7 (x86-64)")
+    vm.cmd("ver", "bdos version 0.8 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -291,19 +323,22 @@ def t_chkdsk(vm):
 def t_persist(vm):
     vm.cmd("cd \\testdir")
     vm.cmd("echo survived a reboot > keep.txt")
+    vm.cmd("control kbd.rate=20", "kbd.rate=20")
     vm.cmd("cd \\")
     vm.send("reboot\r")
     vm.wait_for("Restarting", 10)
     vm.wait_for("C:\\>", 90)
     vm.cmd("type \\testdir\\keep.txt", "survived a reboot")
     vm.cmd("type \\testdir\\poem.txt", "Roses are red")
+    vm.cmd("control", "kbd.rate=20")
+    vm.cmd("control", "kbd.rate=20")
     vm.cmd("chkdsk", "No problems found")
 
 
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.7", 10, start)
+    vm.wait_for("bdos version 0.8", 10, start)
 
 
 def t_basic(vm):
@@ -370,6 +405,88 @@ def t_c(vm):
     vm.screenshot("08-c")
 
 
+def t_control(vm):
+    vm.cmd("cd \\")
+    vm.cmd("control", ["mouse.speed=5", "desktop.scheme=Default", "clock.24h=1"])
+    vm.cmd("date 2026-07-04")
+    vm.cmd("date /t", "Sat 2026-07-04")
+    vm.cmd("time 9:30 pm")
+    vm.cmd("time /t", "21:30")
+    vm.cmd("control clock.24h=0", "clock.24h=0")
+    vm.cmd("time /t", ["9:30", "pm"])
+    vm.cmd("control clock.24h=1")
+    vm.cmd("date 2026-02-30", "Invalid date")
+    vm.cmd("time 25:00", "Invalid time")
+    vm.cmd("type \\bdos\\settings.ini", "clock.24h=1")
+    # programs see the same settings through SYS
+    vm.cmd("md \\testdir")
+    vm.cmd('echo int main(void) { os_set_setting("mouse.speed", 7); printf("speed %s\\n", os_setting("mouse.speed")); return 0; } > \\testdir\\set.c')
+    vm.cmd("\\testdir\\set", "speed 7")
+    vm.cmd("echo SYS \"OS_Setting\", \"mouse.speed\" TO s$ : PRINT \"basic sees \"; s$ > \\testdir\\set.bas")
+    vm.cmd("\\testdir\\set.bas", "basic sees 7")
+    vm.cmd("control mouse.speed=5")
+
+    # on the desktop
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    vm.cmd("control desktop.color=3a3a6e")
+    vm.cmd("type DESK$", "color #3a3a6e")
+    # drag the shell's bottom-right corner: it grows by whole characters
+    wins, _ = vm.windows()
+    x, y, w, h = wins["Shell"]
+    vm.drag(x + w - 2, y + h - 2, x + w + 158, y + h + 102)
+    wins, _ = vm.windows()
+    assert wins["Shell"] == (x, y, w + 160, h + 96), wins["Shell"]
+    vm.cmd("dir /w", "bytes free")
+    # the left edge shrinks it from the other side
+    x, y, w, h = wins["Shell"]
+    vm.drag(x + 1, y + h // 2, x + 201, y + h // 2)
+    wins, _ = vm.windows()
+    assert wins["Shell"] == (x + 200, y, w - 200, h), wins["Shell"]
+    # double-click the title bar: maximized; the button restores it
+    x, y, w, h = wins["Shell"]
+    vm.move_to(x + w // 2, y + 12)
+    vm.double_click()
+    wins, _ = vm.windows()
+    assert wins["Shell"][:3] == (0, 0, 1024), wins["Shell"]
+    mx, my, mw, mh = wins["Shell"]
+    vm.move_to(mx + mw - 4 - 36 + 8, my + 4 + 8)
+    vm.mon("mouse_button 1")
+    vm.mon("mouse_button 0")
+    time.sleep(0.6)
+    wins, _ = vm.windows()
+    assert wins["Shell"] == (x, y, w, h), wins["Shell"]
+    # the Control Panel, and an applet driven from the keyboard
+    vm.send("control\r")
+    time.sleep(2)
+    vm.screenshot("09-control-panel")
+    vm.keys("esc")
+    time.sleep(0.5)
+    vm.send("control date\r")
+    time.sleep(2)
+    vm.send("\t\t15\r")                         # Day: 15, Enter = OK
+    time.sleep(1)
+    vm.cmd("date /t", "2026-07-15")
+    vm.cmd("control desktop.scheme=Ocean", "Ocean")
+    vm.send("control colours\r")
+    time.sleep(1.5)
+    vm.screenshot("10-colours")
+    vm.keys("esc")
+    time.sleep(0.5)
+    vm.cmd("control desktop.scheme=Default")
+    vm.cmd("control desktop.color=2f6f73")
+    start = len(vm.log)
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
+
+
 def t_dos(vm):
     vm.cmd("cd \\dosapps")
     vm.cmd("hello one two", ["Hello from 16-bit DOS on bdos!", "Command tail:[ one two]"])
@@ -400,7 +517,7 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.7")
+    vm.cmd("ver", "bdos version 0.8")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
@@ -433,7 +550,7 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.7")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.8")              # back at the full-screen prompt
 
 
 def t_screens(vm):
@@ -449,7 +566,7 @@ try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
-                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("dos", t_dos),
+                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("control", t_control), ("dos", t_dos),
                      ("desktop", t_desktop), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):

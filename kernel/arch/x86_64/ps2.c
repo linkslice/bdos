@@ -32,14 +32,23 @@ static const char map_hi[128] = {
 	'*', 0, ' ',
 };
 
+/* keys go through input_key_press so the kernel can do its own key repeat */
+static int cur_id;
+#define PRESS(k) input_key_press(cur_id, (k))
+
 static void kbd_byte(uint8_t sc)
 {
+	if (sc == 0xFA || sc == 0xFE || sc == 0xEE || sc == 0x00 || sc == 0xFF)
+		return;		/* acks and controller noise */
 	if (sc == 0xE0) {
 		extended = 1;
 		return;
 	}
 	int release = sc & 0x80;
 	sc &= 0x7F;
+	cur_id = (extended ? 0x100 : 0) | sc;
+	if (release)
+		input_key_release(cur_id);
 
 	if (extended) {
 		extended = 0;
@@ -61,7 +70,7 @@ static void kbd_byte(uint8_t sc)
 		case 0x38: alt = !release; return;
 		}
 		if (k && !release)
-			input_key(k);
+			PRESS(k);
 		return;
 	}
 
@@ -84,29 +93,33 @@ static void kbd_byte(uint8_t sc)
 	if (release)
 		return;
 	if (sc >= 0x3B && sc <= 0x44) {		/* F1-F10 */
-		input_key(KEY_F1 + (sc - 0x3B));
+		PRESS(KEY_F1 + (sc - 0x3B));
 		return;
 	}
 	if (sc == 0x57 || sc == 0x58) {		/* F11, F12 */
-		input_key(KEY_F1 + 10 + (sc - 0x57));
+		PRESS(KEY_F1 + 10 + (sc - 0x57));
 		return;
 	}
 
 	char c = shift ? map_hi[sc] : map_lo[sc];
 	if (!c)
 		return;
+	if (c == '\t' && shift) {
+		PRESS(KEY_SHIFT_TAB);
+		return;
+	}
 	int letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 	if (caps && letter)
 		c ^= 0x20;
 	if (ctrl && letter) {
-		input_key(toupper(c) - '@');	/* ^C = 3 and friends */
+		PRESS(toupper(c) - '@');	/* ^C = 3 and friends */
 		return;
 	}
 	if (alt && letter) {
-		input_key(KEY_ALT | tolower(c));
+		PRESS(KEY_ALT | tolower(c));
 		return;
 	}
-	input_key((uint8_t)c);
+	PRESS((uint8_t)c);
 }
 
 static void mouse_byte(uint8_t b)

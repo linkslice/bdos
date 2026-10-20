@@ -352,6 +352,17 @@ static uint8_t cmos(uint8_t reg)
 	return inb(0x71);
 }
 
+static void cmos_write(uint8_t reg, uint8_t v)
+{
+	outb(0x70, reg);
+	outb(0x71, v);
+}
+
+static uint8_t to_bcd(int v, int is_bcd)
+{
+	return (uint8_t)(is_bcd ? ((v / 10) << 4) | (v % 10) : v);
+}
+
 static int bcd(uint8_t v, int is_bcd)
 {
 	return is_bcd ? (v & 0x0F) + (v >> 4) * 10 : v;
@@ -372,4 +383,50 @@ void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s)
 	*d = bcd(cmos(0x07), b);
 	*mo = bcd(cmos(0x08), b);
 	*y = 2000 + bcd(cmos(0x09), b);
+}
+
+void arch_rtc_set(int y, int mo, int d, int h, int mi, int s)
+{
+	uint64_t f = irq_save();
+	while (cmos(0x0A) & 0x80)
+		cpu_pause();
+	uint8_t regb = cmos(0x0B);
+	int b = !(regb & 0x04);
+	cmos_write(0x0B, regb | 0x80);		/* hold updates while we write */
+	cmos_write(0x00, to_bcd(s, b));
+	cmos_write(0x02, to_bcd(mi, b));
+	uint8_t hr;
+	if (regb & 0x02) {
+		hr = to_bcd(h, b);
+	} else {			/* 12-hour mode: bit 7 is pm */
+		int h12 = h % 12 ? h % 12 : 12;
+		hr = (uint8_t)(to_bcd(h12, b) | (h >= 12 ? 0x80 : 0));
+	}
+	cmos_write(0x04, hr);
+	cmos_write(0x07, to_bcd(d, b));
+	cmos_write(0x08, to_bcd(mo, b));
+	cmos_write(0x09, to_bcd(y % 100, b));
+	cmos_write(0x0B, regb & 0x7F);
+	irq_restore(f);
+}
+
+void arch_cpu_name(char *out, int n)
+{
+	uint32_t r[12];
+	uint32_t a, bx, c, d;
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(bx), "=c"(c), "=d"(d) : "a"(0x80000000u));
+	if (a < 0x80000004u) {
+		strncpy0(out, "x86-64 processor", (size_t)n);
+		return;
+	}
+	for (uint32_t i = 0; i < 3; i++)
+		__asm__ volatile("cpuid" : "=a"(r[i * 4]), "=b"(r[i * 4 + 1]), "=c"(r[i * 4 + 2]), "=d"(r[i * 4 + 3])
+		    : "a"(0x80000002u + i));
+	char name[49];
+	memcpy(name, r, 48);
+	name[48] = 0;
+	char *p = name;
+	while (*p == ' ')
+		p++;
+	strncpy0(out, p, (size_t)n);
 }

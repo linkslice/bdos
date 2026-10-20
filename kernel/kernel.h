@@ -10,7 +10,7 @@
 
 #define BDOS_NAME	"bdos"
 #define BDOS_LONGNAME	"Bryan Disk Operating System"
-#define BDOS_VERSION	"0.7"
+#define BDOS_VERSION	"0.8"
 
 #define NELEM(a)	(sizeof(a) / sizeof((a)[0]))
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
@@ -19,7 +19,7 @@
 /* ---- keys (shared by every input source) -------------------------------- */
 enum {
 	KEY_UP = 0x100, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
-	KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS,
+	KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS, KEY_SHIFT_TAB,
 	KEY_F1 = 0x120,		/* ... KEY_F1 + 11 = F12 */
 	KEY_ALT = 0x1000,	/* KEY_ALT | 'x' */
 };
@@ -79,6 +79,9 @@ struct mouse_event {
 	int buttons;	/* bit 0 left, 1 right, 2 middle */
 };
 void input_key(int key);		/* from drivers, any context */
+void input_key_press(int id, int key);	/* a physical key went down (id = scancode) */
+void input_key_release(int id);
+void input_settings_init(void);
 void input_mouse(int dx, int dy, int buttons);
 int input_getkey(void);			/* -1 if none */
 int input_getmouse(struct mouse_event *ev);	/* 0 if none */

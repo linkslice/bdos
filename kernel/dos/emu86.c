@@ -13,6 +13,7 @@
  * which is where the built-in handlers run.
  */
 #include "../kernel.h"
+#include "../settings.h"
 #include "../vfs.h"
 
 #define MEM_SIZE	(0x100000 + 0x10000)	/* 1 MiB plus the HMA wrap-around */
@@ -950,6 +951,18 @@ static void int21(struct cpu *c)
 		set8(c, 6, (uint8_t)mo);
 		set8(c, 2, (uint8_t)d);
 		SET_AL((rtc_epoch() / 86400 + 4) % 7);
+		break;
+	}
+	case 0x2B: {		/* set date: CX year, DH month, DL day */
+		int y, mo, d, h, mi, s;
+		arch_rtc(&y, &mo, &d, &h, &mi, &s);
+		SET_AL(clock_set(c->r[CX], get8(c, 6), get8(c, 2), h, mi, s) ? 0xFF : 0);
+		break;
+	}
+	case 0x2D: {		/* set time: CH hour, CL minute, DH second */
+		int y, mo, d, h, mi, s;
+		arch_rtc(&y, &mo, &d, &h, &mi, &s);
+		SET_AL(clock_set(y, mo, d, get8(c, 5), get8(c, 1), get8(c, 6)) ? 0xFF : 0);
 		break;
 	}
 	case 0x2C: {

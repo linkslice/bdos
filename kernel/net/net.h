@@ -25,6 +25,8 @@ struct netif {
 void net_register(struct netif *n);
 void net_init(void);
 int net_present(void);
+const char *net_adapter(void);
+int net_link(void);
 const char *net_hostname(void);
 void net_set_hostname(const char *name);
 void net_mac(uint8_t mac[6]);

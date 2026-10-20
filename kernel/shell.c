@@ -10,6 +10,7 @@
  */
 #include "kernel.h"
 #include "sysapi.h"
+#include "settings.h"
 #include "vfs.h"
 #include "drv/drv.h"
 
@@ -48,6 +49,7 @@ struct cmd {
 	char *argv[MAX_ARGS];
 	int unix_style;
 	struct shell *sh;
+	const char *raw;	/* the line after the command name, untouched */
 };
 
 static struct shell *sh_cur(void)
@@ -416,13 +418,18 @@ static int cmd_echo(struct cmd *c)
 		sh->echo_on = 0;
 		return 0;
 	}
-	int first = 1;
-	for (int i = 1; i < c->argc; i++) {
-		if (i == 1 && !strcmp(c->argv[i], "."))
-			continue;
-		kprintf("%s%s", first ? "" : " ", c->argv[i]);
-		first = 0;
-	}
+	/* like DOS: the rest of the line exactly as typed, quotes and all */
+	const char *r = c->raw ? c->raw : "";
+	if (*r == '.' || *r == ' ' || *r == '\t')
+		r++;
+	size_t n = strlen(r);
+	while (n && (r[n - 1] == ' ' || r[n - 1] == '\t'))
+		n--;
+	char out[512];
+	n = MIN(n, sizeof out - 1);
+	memcpy(out, r, n);
+	out[n] = 0;
+	con_write(out);
 	kprintf("\n");
 	return 0;
 }
@@ -1364,22 +1371,169 @@ static int cmd_hwinfo(struct cmd *c)
 	return 0;
 }
 
+/* "2026-10-19", "10-19-2026", "10/19/26": y-m-d when the first part is a
+ * year, otherwise the DOS order m-d-y */
+static int parse_date(const char *s, int *y, int *mo, int *d)
+{
+	long v[3];
+	int n = 0;
+	const char *p = s;
+	while (n < 3) {
+		const char *e;
+		v[n] = strtol(p, &e, 10);
+		if (e == p)
+			return -1;
+		n++;
+		p = e;
+		if (*p == '-' || *p == '/' || *p == '.')
+			p++;
+		else
+			break;
+	}
+	if (n != 3 || *p)
+		return -1;
+	if (v[0] > 31) {
+		*y = (int)v[0]; *mo = (int)v[1]; *d = (int)v[2];
+	} else {
+		*mo = (int)v[0]; *d = (int)v[1]; *y = (int)v[2];
+	}
+	if (*y < 100)
+		*y += 2000;
+	return 0;
+}
+
+/* "19:05", "7:05pm", "7:05:30 PM" */
+static int parse_time(const char *s, int *h, int *mi, int *sec)
+{
+	const char *e;
+	*h = (int)strtol(s, &e, 10);
+	if (e == s || *e != ':')
+		return -1;
+	s = e + 1;
+	*mi = (int)strtol(s, &e, 10);
+	if (e == s)
+		return -1;
+	*sec = 0;
+	if (*e == ':') {
+		s = e + 1;
+		*sec = (int)strtol(s, &e, 10);
+		if (e == s)
+			return -1;
+	}
+	while (*e == ' ')
+		e++;
+	if (*e) {
+		int pm = toupper(*e) == 'P';
+		if (toupper(*e) != 'A' && !pm)
+			return -1;
+		if (*h < 1 || *h > 12)
+			return -1;
+		*h = *h % 12 + (pm ? 12 : 0);
+	}
+	return 0;
+}
+
+static const char *const dow_names[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
 static int cmd_date(struct cmd *c)
 {
-	(void)c;
 	int y, mo, d, h, mi, s;
 	arch_rtc(&y, &mo, &d, &h, &mi, &s);
-	static const char *const dow[] = { "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
-	kprintf("Current date is %s %04d-%02d-%02d\n", dow[(rtc_epoch() / 86400) % 7], y, mo, d);
+	char line[64];
+	const char *want = arg(c, 0);
+	if (!want) {
+		kprintf("Current date is %s %04d-%02d-%02d\n", dow_names[clock_dow(y, mo, d)], y, mo, d);
+		if (has_flag(c, 'T'))
+			return 0;
+		kprintf("Enter new date (yyyy-mm-dd): ");
+		if (read_line(line, sizeof line) <= 0)
+			return 0;
+		want = line;
+	}
+	int ny, nmo, nd;
+	if (parse_date(want, &ny, &nmo, &nd) || clock_set(ny, nmo, nd, h, mi, s)) {
+		kprintf("Invalid date\n");
+		return 1;
+	}
 	return 0;
 }
 
 static int cmd_time(struct cmd *c)
 {
-	(void)c;
 	int y, mo, d, h, mi, s;
 	arch_rtc(&y, &mo, &d, &h, &mi, &s);
-	kprintf("Current time is %02d:%02d:%02d\n", h, mi, s);
+	char line[64], buf[32];
+	const char *want = NULL;
+	/* "TIME 7:05 pm" arrives as two words */
+	char joined[64] = "";
+	for (int i = 0; arg(c, i); i++) {
+		if (i)
+			strcat0(joined, " ", sizeof joined);
+		strcat0(joined, arg(c, i), sizeof joined);
+	}
+	if (joined[0])
+		want = joined;
+	if (!want) {
+		clock_format_time(buf, sizeof buf, h, mi, s, 1);
+		kprintf("Current time is %s\n", buf);
+		if (has_flag(c, 'T'))
+			return 0;
+		kprintf("Enter new time: ");
+		if (read_line(line, sizeof line) <= 0)
+			return 0;
+		want = line;
+	}
+	int nh, nmi, ns;
+	if (parse_time(want, &nh, &nmi, &ns) || clock_set(y, mo, d, nh, nmi, ns)) {
+		kprintf("Invalid time\n");
+		return 1;
+	}
+	return 0;
+}
+
+/* CONTROL: settings from the command line; on the desktop, the Control Panel */
+static int cmd_control(struct cmd *c)
+{
+	const char *a0 = arg(c, 0);
+	extern int control_open(void *wm, const char *applet);
+	if (!a0 || !strchr(a0, '=')) {
+		struct task *t = task_current();
+		if (t->desk && (!a0 || strcasecmp(a0, "LIST"))) {
+			if (control_open(t->desk, a0)) {
+				kprintf("No such Control Panel applet: %s\n"
+				    "Try DATE, NETWORK, DESKTOP, COLORS, MOUSE, KEYBOARD or SYSTEM.\n", a0);
+				return 1;
+			}
+			return 0;
+		}
+		int n;
+		const struct setting_info *k = settings_known(&n);
+		for (int i = 0; i < n; i++) {
+			char kv[64];
+			snprintf(kv, sizeof kv, "%s=%s", k[i].key, setting(k[i].key));
+			kprintf("  %-28s %s\n", kv, k[i].help);
+		}
+		kprintf("\nCONTROL key=value changes one%s.\n", t->desk ? "" :
+		    "; on the desktop, CONTROL opens the Control Panel");
+		return 0;
+	}
+	char key[64];
+	const char *eq = strchr(a0, '=');
+	size_t kl = MIN((size_t)(eq - a0), sizeof key - 1);
+	memcpy(key, a0, kl);
+	key[kl] = 0;
+	/* let "CONTROL desktop.scheme=Hot Dog Stand" keep its spaces */
+	char val[96];
+	strncpy0(val, eq + 1, sizeof val);
+	for (int i = 1; arg(c, i); i++) {
+		strcat0(val, " ", sizeof val);
+		strcat0(val, arg(c, i), sizeof val);
+	}
+	if (setting_set(key, val)) {
+		kprintf("Can't set %s\n", key);
+		return 1;
+	}
+	kprintf("%s=%s\n", key, setting(key));
 	return 0;
 }
 
@@ -1818,8 +1972,9 @@ static const struct command commands[] = {
 	{ "CHKDSK",  cmd_chkdsk,  "Check a drive (/F fixes problems)" },
 	{ "CLS",     cmd_cls,     "Clear the screen" },
 	{ "COPY",    cmd_copy,    "Copy files (COPY CON FILE to type one in)" },
+	{ "CONTROL", cmd_control, "Settings; on the desktop, the Control Panel (CONTROL DATE...)" },
 	{ "CTTY",    cmd_ctty,    "Move this shell to COM1, CON or \\\\HOST" },
-	{ "DATE",    cmd_date,    "Show the date" },
+	{ "DATE",    cmd_date,    "Show or set the date: DATE 2026-10-19 (/T only shows)" },
 	{ "DEL",     cmd_del,     "Delete files (/P asks, /Q quiet)" },
 	{ "DELTREE", cmd_deltree, "Delete a directory and everything in it" },
 	{ "DIR",     cmd_dir,     "List files (/W wide /A all /B bare /S subdirs /P pause)" },
@@ -1856,7 +2011,7 @@ static const struct command commands[] = {
 	{ "SORT",    cmd_sort,    "Sort lines (/R reverse)" },
 	{ "START",   cmd_start,   "Run a command as a separate task" },
 	{ "TASKS",   cmd_tasks,   "List running tasks" },
-	{ "TIME",    cmd_time,    "Show the time" },
+	{ "TIME",    cmd_time,    "Show or set the time: TIME 19:05 or TIME 7:05 pm (/T only shows)" },
 	{ "TOUCH",   cmd_touch,   "Create a file or update its time" },
 	{ "TREE",    cmd_tree,    "Show the directory tree (/F with files)" },
 	{ "TYPE",    cmd_type,    "Display text files" },
@@ -2127,7 +2282,18 @@ static int exec_simple(char *line)
 	char cmdbuf[64];
 	memset(&c, 0, sizeof c);
 	c.sh = sh;
+	char raw[512];
+	strncpy0(raw, line, sizeof raw);
 	c.argc = tokenize(line, c.argv, cmdbuf, sizeof cmdbuf);
+	if (c.argc) {
+		const char *r = raw;
+		while (*r == ' ' || *r == '\t')
+			r++;
+		if (*r == '"')
+			r += 2;		/* the quotes around a quoted name */
+		r += MIN(strlen(c.argv[0]), strlen(r));
+		c.raw = r;
+	}
 	if (!c.argc)
 		return sh->errorlevel;
 	const char *name = c.argv[0];

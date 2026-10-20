@@ -1,0 +1,42 @@
+Settings and the Control Panel
+==============================
+
+bdos keeps its settings in C:\BDOS\SETTINGS.INI, one key=value per line.
+Three ways to change them, all the same underneath:
+
+  On the desktop   Control Panel (in Program Manager's Main group, or
+                   Options > Control Panel, or type CONTROL in a shell)
+  At the prompt    CONTROL                      lists every setting
+                   CONTROL mouse.speed=7        changes one
+  From programs    SYS "OS_SetSetting", "mouse.speed", 7        (BASIC)
+                   os_set_setting("mouse.speed", 7);           (C)
+                   SYS "OS_Setting", "clock.24h" TO s$         reads one
+
+Changes take effect straight away and are saved.
+
+The applets
+-----------
+Date/Time   the clock, the calendar, 24-hour or am/pm
+Network     this computer's name; browse the LAN and open a shell or a
+            desktop on another machine (T: is your folder there)
+Desktop     background colour; whether WIN starts at boot (it edits the
+            WIN line in AUTOEXEC.BAT for you)
+Colours     window colour schemes - try Hot Dog Stand
+Mouse       pointer speed, double-click speed, swap buttons
+Keyboard    key repeat delay and rate
+System      version, processor, memory, display, network, drives
+
+CONTROL DATE, CONTROL MOUSE and so on open one applet directly.
+
+The clock from the prompt
+-------------------------
+DATE                 shows the date and asks for a new one (Enter keeps it)
+DATE 2026-10-20      sets it (10-20-2026 works too)
+TIME 19:05           sets the time (TIME 7:05 pm works too)
+DATE /T, TIME /T     just show
+
+Windows
+-------
+Drag any edge or corner of a window to resize it; shells reflow to the
+new size. Double-click a title bar, or press the button beside the close
+box, to maximize; do it again to restore. Window > Tile arranges them.

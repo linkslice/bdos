@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.7 (x86-64) - Bryan Disk Operating System
+bdos 0.8 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -25,7 +25,7 @@ mtools nasm qemu-system-x86 ovmf fonts-unifont`.
 ```sh
 make            # build/bdos.img: a 192 MiB disk, with an ESP plus a bdosfs partition
 make run        # boot it in QEMU; COM1 is a terminal too
-make test       # 15 headless suites: shell, files, BASIC, C, DOS, desktop...
+make test       # 16 headless suites: shell, files, BASIC, C, DOS, desktop...
 make nettest    # two VMs on one virtual LAN: NET VIEW, CTTY/WIN \\BOX2, NET USE
 ```
 
@@ -90,6 +90,17 @@ the memory map and RSDP, and exits boot services. It passes a
   `MOUSE$`. For example, `echo color #3a3a6e > DESK$`.
 - `WIN` typed inside a window nests a whole desktop in that window, and each
   level gets its own colour.
+- Windows resize from any edge or corner, and shells reflow to the new size.
+  Double-click a title bar, or use the button beside the close box, to
+  maximize.
+- The Control Panel has applets for Date/Time (with a calendar), Network
+  (rename the machine, browse the LAN, open a remote shell or desktop),
+  Desktop (colour, start at boot), Colours (window schemes), Mouse,
+  Keyboard and System. There's a Clock too.
+
+**Settings** live in `C:\BDOS\SETTINGS.INI` and change the same way from
+everywhere: the Control Panel, `CONTROL key=value` at the prompt, or the
+`OS_SetSetting` SYS call from BASIC and C. `DATE` and `TIME` set the clock.
 
 **DOS programs.** An 8086 emulator runs `.COM` and MZ `.EXE` programs.
 - It handles INT 21h file and console calls, plus INT 10h, 16h and 1Ah.
@@ -115,7 +126,7 @@ kernel/arch/x86_64/     entry, GDT/IDT/paging/PIC/PIT, PS/2, COM1 - all the CPU-
 kernel/*.c              memory, tasks, console, VFS, shell, EDIT, SYS table
 kernel/drv/             PCI, AHCI (+ RAM disk), e1000
 kernel/lang/            BASIC, the C interpreter, soft math
-kernel/gui/             drawing, window manager, Program Manager, File Manager
+kernel/gui/             drawing, window manager, forms, Program Manager, File Manager, Control Panel
 kernel/dos/             8086 emulator
 kernel/net/             BDNET and the remote services
 fs/                     bdosfs (shared with the host tool)

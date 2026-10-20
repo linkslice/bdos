@@ -4,7 +4,7 @@
 
 #include "gfx.h"
 
-enum { EV_NONE, EV_KEY, EV_MOVE, EV_DOWN, EV_UP, EV_CLOSE };
+enum { EV_NONE, EV_KEY, EV_MOVE, EV_DOWN, EV_UP, EV_CLOSE, EV_RESIZE };
 
 struct event {
 	int type;

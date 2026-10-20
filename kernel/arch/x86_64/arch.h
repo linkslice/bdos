@@ -107,6 +107,8 @@ _Noreturn void arch_halt(void);		/* interrupts off, stop for good */
 uint32_t arch_pci_read32(int bus, int slot, int func, uint8_t off);
 void arch_pci_write32(int bus, int slot, int func, uint8_t off, uint32_t v);
 void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s);
+void arch_rtc_set(int y, int mo, int d, int h, int mi, int s);
+void arch_cpu_name(char *out, int n);	/* "Intel(R) Core(TM)..." or similar */
 
 /* Non-local exits for the language interpreters */
 struct arch_jmpbuf {

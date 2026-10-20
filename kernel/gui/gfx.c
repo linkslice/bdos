@@ -274,7 +274,41 @@ static const struct icon icons[] = {
 		"................", "kkkkkkkkkkkkkkkk", "knnnnnnnnnnnnnnk", "kggggggggggggggk",
 		"kgwwwwwwwwwwwwgk", "kgwkkwwkkwwkkwgk", "kgwkkwwkkwwkkwgk", "kgwwwwwwwwwwwwgk",
 		"kgwkkwwkkwwwwwgk", "kgwkkwwkkwwwwwgk", "kgwwwwwwwwwwwwgk", "kggggggggggggggk",
-		"kkkkkkkkkkkkkkkk", "................", "................", "................" } },
+		"kkkkkkkkkkkkkkkk", "................", "................", "................" } },	{ "control", {
+		"kkkkkkkkkkkkkkkk", "knnnnnnnnnnnnnnk", "kggggggggggggggk", "kggdgggdgggdgggk",
+		"kggdgggdgggdgggk", "kgkkkggdgggdgggk", "kggdgggdgggdgggk", "kggdgggdgkkkgggk",
+		"kggdgggdgggdgggk", "kggdgkkkgggdgggk", "kggdgggdgggdgggk", "kggdgggdgggdgggk",
+		"kggggggggggggggk", "kkkkkkkkkkkkkkkk", "................", "................" } },
+	{ "clock", {
+		"................", ".....kkkkkk.....", "...kkwwwwwwkk...", "..kwwwwkwwwwwk..",
+		".kwwwwwkwwwwwwk.", ".kwwwwwkwwwwwwk.", "kwwwwwwkwwwwwwwk", "kwkwwwwkwwwwwkwk",
+		"kwwwwwwkkkkkwwwk", "kwwwwwwwwwwwwwwk", ".kwwwwwwwwwwwwk.", ".kwwwwwwwwwwwwk.",
+		"..kwwwwkwwwwwk..", "...kkwwwwwwkk...", ".....kkkkkk.....", "................" } },
+	{ "calendar", {
+		"................", "..k..k....k..k..", "kkkkkkkkkkkkkkkk", "krrrrrrrrrrrrrrk",
+		"krrrrrrrrrrrrrrk", "kkkkkkkkkkkkkkkk", "kwwwwwwwwwwwwwwk", "kwdwdwdwdwdwdwwk",
+		"kwwwwwwwwwwwwwwk", "kwdwdwdwkkwdwwwk", "kwwwwwwwkkwwwwwk", "kwdwdwdwdwdwdwwk",
+		"kwwwwwwwwwwwwwwk", "kwdwdwdwwwwwwwwk", "kwwwwwwwwwwwwwwk", "kkkkkkkkkkkkkkkk" } },
+	{ "mouse", {
+		"........k.......", "........k.......", ".......k........", "......kkkk......",
+		".....kwwkwk.....", "....kwwwkwwk....", "....kwwwkwwk....", "....kkkkkkkk....",
+		"....kwwwwwwk....", "....kwwwwwwk....", "....kwwwwwwk....", "....kwwwwwwk....",
+		"....kwwwwwwk....", ".....kwwwwk.....", "......kkkk......", "................" } },
+	{ "keyboard", {
+		"................", "................", "................", "kkkkkkkkkkkkkkkk",
+		"kggggggggggggggk", "kgwkwkwkwkwkwkgk", "kggggggggggggggk", "kgwkwkwkwkwkwkgk",
+		"kggggggggggggggk", "kgwkwwwwwwwkwkgk", "kggggggggggggggk", "kkkkkkkkkkkkkkkk",
+		"................", "................", "................", "................" } },
+	{ "palette", {
+		"................", "....kkkkkkk.....", "..kkwwwwwwwkk...", ".kwwrrwwwbbwwk..",
+		".kwwrrwwwbbwwwk.", "kwwwwwwwwwwwwwk.", "kweewwwwwwwyywk.", "kweewwwkkwwyywk.",
+		"kwwwwwkwwkwwwwk.", "kwwwwwkwwkwwwk..", ".kwwwwwkkwwwk...", ".kwccwwwwwwk....",
+		"..kwccwwwwk.....", "...kkkkkkk......", "................", "................" } },
+	{ "desktop", {
+		".kkkkkkkkkkkkkk.", ".kggggggggggggk.", ".kgkkkkkkkkkkgk.", ".kgkttttttttkgk.",
+		".kgktnnnntttkgk.", ".kgktwwwwtttkgk.", ".kgktwwwwtttkgk.", ".kgkttttttttkgk.",
+		".kgkkkkkkkkkkgk.", ".kggggggggggggk.", ".kkkkkkkkkkkkkk.", ".....kggggk.....",
+		"...kkkkkkkkkk...", "..kggggggggggk..", "..kkkkkkkkkkkk..", "................" } },
 };
 
 static uint32_t icon_colour(char c)

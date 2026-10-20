@@ -9,6 +9,7 @@ bdos roadmap
 [x] BBC-style BASIC
 [x] Run-from-source C (see "C Programs.txt")
 [x] Device-based desktop: CON, MOUSE$, DRAW$, DESK$, nesting
+[x] Resizable, maximizable windows; Control Panel and saved settings
 [x] WIN \\HOST and CTTY \\HOST sessions with a T: drive; NET VIEW, NET USE
 [x] 8086 emulator for .COM and .EXE programs
 [ ] Lemote Yeeloong (MIPS64) port - planned, arch layer split (docs/PORTING-YEELOONG.md)

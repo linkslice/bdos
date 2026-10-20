@@ -621,6 +621,8 @@ static void launch_cmd(struct wm *wm, const char *label, const char *cmd)
 
 /* ---- dialogs ---------------------------------------------------------------------- */
 
+static void render_dialog(struct win *w);
+
 static struct win *open_dialog(struct wm *wm, const char *title, const char *msg, int input,
     int purpose)
 {
@@ -648,6 +650,7 @@ static struct win *open_dialog(struct wm *wm, const char *title, const char *msg
 		return NULL;
 	}
 	w->dlg = d;
+	render_dialog(w);	/* draw it now, not on the first key */
 	return w;
 }
 
@@ -675,8 +678,9 @@ static void render_dialog(struct win *w)
 		fill(s, 20 + (int)strlen(d->field) * FONT_W, y + 3, 2, 16, P(0));
 		y += 32;
 	}
-	draw_button(s, s->w / 2 - (d->input ? 90 : 40), s->h - 34, 80, "OK", 1);
-	if (d->input)
+	int two = d->input || d->purpose == 2;	/* questions get a way out */
+	draw_button(s, s->w / 2 - (two ? 90 : 40), s->h - 34, 80, "OK", 1);
+	if (two)
 		draw_button(s, s->w / 2 + 10, s->h - 34, 80, "Cancel", 0);
 	win_dirty_all(w);
 }
@@ -734,10 +738,11 @@ static void dialog_click(struct wm *wm, struct win *w, int x, int y)
 	int by = s->h - 34;
 	if (y < by || y > by + 24)
 		return;
-	int okx = s->w / 2 - (d->input ? 90 : 40);
+	int two = d->input || d->purpose == 2;
+	int okx = s->w / 2 - (two ? 90 : 40);
 	if (x >= okx && x < okx + 80)
 		dialog_finish(wm, w, 1);
-	else if (d->input && x >= s->w / 2 + 10 && x < s->w / 2 + 90)
+	else if (two && x >= s->w / 2 + 10 && x < s->w / 2 + 90)
 		dialog_finish(wm, w, 2);
 }
 

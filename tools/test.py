@@ -479,9 +479,18 @@ def t_control(vm):
     time.sleep(0.5)
     vm.cmd("control desktop.scheme=Default")
     vm.cmd("control desktop.color=2f6f73")
-    start = len(vm.log)
-    vm.keys("alt-x")
-    time.sleep(0.8)
+    # Program Manager's close box asks before leaving, and the question shows
+    wins, _ = vm.windows()
+    x, y, w, h = wins["Program Manager"]
+    vm.move_to(x + w - 4 - 9, y + 4 + 8)
+    vm.mon("mouse_button 1")
+    vm.mon("mouse_button 0")
+    time.sleep(1)
+    vm.screenshot("11-exit-dialog")
+    shot = Image.open(os.path.join(OUT, "11-exit-dialog.png")).convert("RGB")
+    raw = shot.crop((302, 241, 722, 329)).tobytes()
+    dark = sum(1 for i in range(0, len(raw), 3) if max(raw[i:i + 3]) < 40)
+    assert dark > 200, f"the Exit Desktop dialog looks empty ({dark} dark pixels)"
     vm.keys("ret")
     time.sleep(1.5)
     vm.cmd("ver", "bdos version")

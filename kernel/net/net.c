@@ -127,7 +127,10 @@ static void send_frame(const uint8_t *dst, int type, uint32_t conn, uint32_t seq
 	h->len = (uint16_t)len;
 	if (len)
 		memcpy(buf + sizeof *h, payload, len);
-	nif->send(nif, buf, sizeof *h + len);
+	if (ip_is_pseudo(dst))
+		ip_bdnet_send(dst, buf, sizeof *h + len);	/* a peer reached over UDP */
+	else
+		nif->send(nif, buf, sizeof *h + len);
 }
 
 /* ---- names ---------------------------------------------------------------------- */
@@ -334,6 +337,8 @@ static void handle_frame(const uint8_t *buf, int len)
 			for (int i = 0; i < (int)NELEM(seen); i++)
 				if (seen[i].when && !memcmp(seen[i].mac, h->src, 6))
 					strncpy0(c->peer_name, seen[i].name, sizeof c->peer_name);
+			if (!c->peer_name[0])	/* bterm over UDP: its address */
+				ip_peer_addr(h->src, c->peer_name, sizeof c->peer_name);
 			spawn_service(c);
 		}
 		send_frame(h->src, F_SYNACK, h->conn, 0, 0, NULL, 0);
@@ -388,6 +393,12 @@ static void handle_frame(const uint8_t *buf, int len)
 	}
 }
 
+/* BDNET frames that arrived some other way (UDP, from ip.c) */
+void bdnet_input(const uint8_t *buf, int len)
+{
+	handle_frame(buf, len);
+}
+
 static void timers(void)
 {
 	uint64_t now = uptime_ms();
@@ -427,11 +438,12 @@ static void netd(void *arg)
 	for (;;) {
 		int busy = 0, n;
 		while ((n = nif->recv(nif, buf, 2048)) != 0) {
-			if (n > 0)
+			if (n > 0 && !ip_input(buf, n))
 				handle_frame(buf, n);
 			busy = 1;
 		}
 		timers();
+		ip_timers();
 		if (busy)
 			task_yield();
 		else
@@ -616,6 +628,7 @@ void net_init(void)
 	if (!hostname[0])
 		snprintf(hostname, sizeof hostname, "BDOS-%02X%02X%02X", nif->mac[3], nif->mac[4],
 		    nif->mac[5]);
+	ip_init(nif);
 	task_spawn("netd", netd, NULL, NULL);
 	kprintf("Network: %s %02x:%02x:%02x:%02x:%02x:%02x, this machine is \\\\%s\n", nif->name,
 	    nif->mac[0], nif->mac[1], nif->mac[2], nif->mac[3], nif->mac[4], nif->mac[5], hostname);

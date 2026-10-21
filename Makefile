@@ -33,7 +33,7 @@ KERNEL_OBJS := $(patsubst %.c,$(B)/%.o,$(KERNEL_C)) $(patsubst %.S,$(B)/%.o,$(KE
 KERNEL_HDRS := $(wildcard kernel/*.h kernel/drv/*.h kernel/lang/*.h kernel/gui/*.h kernel/net/*.h kernel/arch/$(ARCH)/*.h fs/*.h include/*.h)
 ROOTFS_FILES := $(shell find rootfs -type f 2>/dev/null | sed 's/ /\\ /g')
 
-.PHONY: all run test nettest clean
+.PHONY: btermtest all run test nettest clean
 all: $(B)/bdos.img
 
 $(B)/BOOTX64.EFI: loader/loader.c loader/efi.h include/bootinfo.h
@@ -98,6 +98,12 @@ test: $(B)/bdos.img
 
 nettest: $(B)/bdos.img
 	python3 tools/nettest.py $(B)/bdos.img $(B)/nettest
+
+bterm/bterm: bterm/bterm.c
+	$(MAKE) -C bterm
+
+btermtest: $(B)/bdos.img bterm/bterm
+	python3 tools/btermtest.py $(B)/bdos.img bterm/bterm $(B)/btermtest
 
 clean:
 	rm -rf $(B)

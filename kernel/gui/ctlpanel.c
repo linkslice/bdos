@@ -450,7 +450,7 @@ static void open_network(struct wm *wm)
 	struct netapp *n = kzalloc(sizeof *n);
 	if (!n)
 		return;
-	int cw = 420, ch = 330;
+	int cw = 420, ch = 352;
 	struct form *f = form_new("Network", cw, ch, net_event, n);
 	if (!f) {
 		kfree(n);
@@ -472,15 +472,31 @@ static void open_network(struct wm *wm)
 	}
 	form_add(f, FW_LABEL, 14, 44, 0, 0, "Adapter:");
 	n->info = form_add(f, FW_LABEL, 86, 44, 0, 0, info);
-	form_add(f, FW_LABEL, 14, 66, 0, 0, "Others reach this computer as \\\\NAME on the LAN.");
+	char ipline[96] = "none";
+	if (up) {
+		struct ip_info in;
+		ip_get(&in);
+		char a[16];
+		ip_fmt(in.ip, a);
+		snprintf(ipline, sizeof ipline, "%s%s   bterm: %s", in.ip ? a : "none yet",
+		    in.dhcp ? " (DHCP)" : "", in.udp ? "on" : "off");
+		if (in.udp) {
+			char port[16];
+			snprintf(port, sizeof port, ", UDP %d", in.port);
+			strcat0(ipline, port, sizeof ipline);
+		}
+	}
+	form_add(f, FW_LABEL, 14, 66, 0, 0, "IP address:");
+	form_add(f, FW_LABEL, 110, 66, 0, 0, ipline);
+	form_add(f, FW_LABEL, 14, 88, 0, 0, "Others reach this computer as \\\\NAME on the LAN.");
 
-	form_add(f, FW_GROUP, 8, 90, cw - 16, 186, "Machines on the network");
-	n->list = form_add(f, FW_LIST, 18, 114, 260, 150, up ? "Press Browse" : "");
-	n->browse = form_add(f, FW_BUTTON, 292, 114, 110, 26, "Browse");
-	n->shell = form_add(f, FW_BUTTON, 292, 150, 110, 26, "Shell...");
-	n->desk = form_add(f, FW_BUTTON, 292, 186, 110, 26, "Desktop...");
-	form_add(f, FW_LABEL, 292, 222, 0, 0, "T: is your");
-	form_add(f, FW_LABEL, 292, 240, 0, 0, "folder there");
+	form_add(f, FW_GROUP, 8, 112, cw - 16, 186, "Machines on the network");
+	n->list = form_add(f, FW_LIST, 18, 136, 260, 150, up ? "Press Browse" : "");
+	n->browse = form_add(f, FW_BUTTON, 292, 136, 110, 26, "Browse");
+	n->shell = form_add(f, FW_BUTTON, 292, 172, 110, 26, "Shell...");
+	n->desk = form_add(f, FW_BUTTON, 292, 208, 110, 26, "Desktop...");
+	form_add(f, FW_LABEL, 292, 244, 0, 0, "T: is your");
+	form_add(f, FW_LABEL, 292, 262, 0, 0, "folder there");
 	form_enable(f, n->browse, up);
 	form_enable(f, n->shell, up);
 	form_enable(f, n->desk, up);

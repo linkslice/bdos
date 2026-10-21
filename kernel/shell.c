@@ -1946,6 +1946,109 @@ static int cmd_hostname(struct cmd *c)
 	return 0;
 }
 
+/* IPCONFIG: the TCP/IP side of the network card */
+static int cmd_ipconfig(struct cmd *c)
+{
+	if (!net_present()) {
+		kprintf("No network adapter.\n");
+		return 1;
+	}
+	struct ip_info in;
+	ip_get(&in);
+	int renew = 0, release = 0;
+	for (int i = 1; i < c->argc; i++)
+		if (is_switch(c->argv[i], c->unix_style)) {
+			const char *sw = c->argv[i] + 1 + (c->argv[i][1] == '-');
+			renew |= !strcasecmp(sw, "RENEW");
+			release |= !strcasecmp(sw, "RELEASE");
+		}
+	if (renew || release) {
+		if (release) {
+			ip_release();
+			kprintf("Address released.\n");
+			return 0;
+		}
+		if (!in.dhcp) {
+			kprintf("This machine has a fixed address (CONTROL net.ip=dhcp to use DHCP).\n");
+			return 1;
+		}
+		ip_renew();
+		kprintf("Asking for an address");
+		for (int i = 0; i < 20; i++) {
+			sleep_ms(500);
+			ip_get(&in);
+			if (in.bound)
+				break;
+			kprintf(".");
+		}
+		kprintf(in.bound ? "\n" : "\nNo DHCP server answered.\n");
+		if (!in.bound)
+			return 1;
+	}
+	char a[16], m[16], g[16], d[16], sv[16];
+	uint8_t mac[6];
+	net_mac(mac);
+	ip_fmt(in.ip, a);
+	ip_fmt(in.mask, m);
+	ip_fmt(in.gw, g);
+	ip_fmt(in.dns, d);
+	ip_fmt(in.server, sv);
+	kprintf("\nEthernet adapter %s (\\\\%s):\n\n", net_adapter(), net_hostname());
+	kprintf("   Physical address . . : %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1], mac[2],
+	    mac[3], mac[4], mac[5]);
+	kprintf("   DHCP . . . . . . . . : %s\n", in.dhcp ? (in.bound ? "yes" : "yes, still asking") : "no, fixed address");
+	kprintf("   IPv4 address . . . . : %s\n", in.ip ? a : "(none yet)");
+	if (in.ip) {
+		kprintf("   Subnet mask  . . . . : %s\n", m);
+		kprintf("   Default gateway  . . : %s\n", in.gw ? g : "");
+		kprintf("   DNS server . . . . . : %s\n", in.dns ? d : "");
+	}
+	if (in.dhcp && in.bound) {
+		kprintf("   DHCP server  . . . . : %s\n", sv);
+		kprintf("   Lease ends in  . . . : %luh %02lum\n", in.lease_left / 3600, in.lease_left / 60 % 60);
+	}
+	if (in.udp)
+		kprintf("   bterm (UDP)  . . . . : port %d, %s\n", in.port, in.password ? "password set" : "no password");
+	else
+		kprintf("   bterm (UDP)  . . . . : off (CONTROL net.udp=1)\n");
+	kprintf("\n");
+	return 0;
+}
+
+/* PING a.b.c.d */
+static int cmd_ping(struct cmd *c)
+{
+	const char *host = arg(c, 0);
+	uint32_t dst;
+	if (!host || ip_parse(host, &dst)) {
+		kprintf("Usage: PING a.b.c.d   (there's no DNS yet)\n");
+		return 1;
+	}
+	struct ip_info in;
+	ip_get(&in);
+	if (!net_present() || !in.ip) {
+		kprintf("No IP address yet. Try IPCONFIG.\n");
+		return 1;
+	}
+	kprintf("Pinging %s:\n", host);
+	int ok = 0;
+	for (int i = 0; i < 4; i++) {
+		int ms = ip_ping(dst, i + 1, 1500);
+		if (ms >= 0) {
+			kprintf("Reply from %s: time=%dms\n", host, ms);
+			ok++;
+		} else {
+			kprintf("Request timed out.\n");
+		}
+		if (con_pollkey() == 3)
+			break;
+		if (i < 3 && ms >= 0)
+			sleep_ms((uint64_t)MAX(0, 1000 - ms));
+	}
+	kprintf("%d of 4 answered.\n", ok);
+	return ok ? 0 : 1;
+}
+
 /* --- command tables --- */
 
 typedef int (*cmd_fn)(struct cmd *);
@@ -1996,7 +2099,9 @@ static const struct command commands[] = {
 	{ "MKDIR",   cmd_md,      NULL },
 	{ "MORE",    cmd_more,    "Show input a screen at a time" },
 	{ "MOVE",    cmd_move,    "Move or rename files and directories" },
+	{ "IPCONFIG", cmd_ipconfig, "TCP/IP address (IPCONFIG /RENEW, /RELEASE)" },
 	{ "NET",     cmd_net,     "Networking: NET VIEW, NET USE" },
+	{ "PING",    cmd_ping,    "Check another machine answers: PING 10.0.2.2" },
 	{ "PATH",    cmd_path,    "Show or set where programs are found" },
 	{ "PAUSE",   cmd_pause,   "Wait for a key" },
 	{ "PROMPT",  cmd_prompt,  "Set the prompt ($P path $G > $D date $T time)" },

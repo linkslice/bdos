@@ -22,6 +22,13 @@ static const struct setting_info known[] = {
 	{ "kbd.delay", "500", "key repeat delay in milliseconds (250-1000)" },
 	{ "kbd.rate", "10", "key repeats per second (2-30)" },
 	{ "clock.24h", "1", "1 for a 24-hour clock, 0 for am/pm" },
+	{ "net.ip", "dhcp", "dhcp, or a fixed address like 192.168.1.50" },
+	{ "net.mask", "255.255.255.0", "subnet mask (fixed address only)" },
+	{ "net.gateway", "", "default gateway (fixed address only)" },
+	{ "net.dns", "", "DNS server (fixed address only)" },
+	{ "net.udp", "1", "1 lets bterm and routed peers in over UDP" },
+	{ "net.port", "17979", "UDP port for bterm and BDNET over UDP" },
+	{ "net.password", "", "password bterm must give (empty: none)" },
 	{ "clock.seconds", "1", "1 to show seconds on the clock" },
 };
 

@@ -40,3 +40,16 @@ Windows
 Drag any edge or corner of a window to resize it; shells reflow to the
 new size. Double-click a title bar, or press the button beside the close
 box, to maximize; do it again to restore. Window > Tile arranges them.
+
+The network
+-----------
+IPCONFIG             this machine's address (DHCP unless you set one)
+IPCONFIG /RENEW      ask the DHCP server again
+PING 10.0.2.2        does that machine answer?
+CONTROL net.ip=192.168.1.50   a fixed address (and net.mask, net.gateway)
+CONTROL net.ip=dhcp           back to DHCP
+CONTROL net.password=secret   bterm must give this password
+CONTROL net.udp=0             no bterm or routed BDNET at all
+
+bterm (on Linux or a Mac) shows this machine's desktop in a window, or a
+shell with -t. The folder it was started from is T: here.

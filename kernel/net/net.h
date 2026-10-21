@@ -61,6 +61,26 @@ const char *conn_peer(struct conn *c);
 void *conn_user(struct conn *c);
 void conn_set_user(struct conn *c, void *u);
 
+/* TCP/IP (ip.c): enough to carry BDNET over UDP for bterm and routed peers */
+struct ip_info {
+	uint32_t ip, mask, gw, dns, server;
+	int dhcp, bound, udp, port, password;
+	uint64_t lease_left;	/* seconds */
+};
+void ip_init(struct netif *n);
+int ip_input(const uint8_t *frame, int len);	/* 1 if it was ARP/IP */
+void ip_timers(void);
+int ip_is_pseudo(const uint8_t *mac);
+int ip_bdnet_send(const uint8_t *mac, const void *frame, size_t len);
+int ip_peer_addr(const uint8_t *mac, char *out, size_t n);
+void ip_get(struct ip_info *info);
+void ip_renew(void);
+void ip_release(void);
+int ip_ping(uint32_t dst, int seq, int timeout_ms);	/* ms, or -1 */
+int ip_parse(const char *s, uint32_t *out);
+void ip_fmt(uint32_t ip, char *out);			/* out: 16 bytes */
+void bdnet_input(const uint8_t *frame, int len);	/* a BDNET frame from any wire */
+
 /* servers: called in a fresh task for each accepted connection */
 typedef void (*service_fn)(struct conn *c, const uint8_t *hello, size_t hlen);
 void net_service(int svc, service_fn fn);

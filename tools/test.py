@@ -221,7 +221,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.8" in out, out
+    assert "bdos 0.9" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -229,7 +229,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.8.1 (x86-64)")
+    vm.cmd("ver", "bdos version 0.9 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -376,7 +376,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.8", 10, start)
+    vm.wait_for("bdos version 0.9", 10, start)
 
 
 def t_basic(vm):
@@ -560,7 +560,7 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.8")
+    vm.cmd("ver", "bdos version 0.9")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
@@ -593,7 +593,7 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.8")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.9")              # back at the full-screen prompt
 
 
 def t_screens(vm):

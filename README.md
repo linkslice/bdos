@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.8.1 (x86-64) - Bryan Disk Operating System
+bdos 0.9 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -27,6 +27,7 @@ make            # build/bdos.img: a 192 MiB disk, with an ESP plus a bdosfs part
 make run        # boot it in QEMU; COM1 is a terminal too
 make test       # 16 headless suites: shell, files, BASIC, C, DOS, desktop...
 make nettest    # two VMs on one virtual LAN: NET VIEW, CTTY/WIN \\BOX2, NET USE
+make btermtest  # bterm against a VM: DHCP, a text session, the desktop, T:, passwords
 ```
 
 The image also boots real UEFI PCs from a USB stick if you `dd` it across.
@@ -117,6 +118,16 @@ in the spirit of NetBEUI, with an e1000 driver.
   directory you launched the session from, the same idea as drawterm's
   `/mnt/term`.
 
+**TCP/IP, and bterm.** bdos also has a small IP stack: ARP, IPv4, ICMP, UDP
+and a DHCP client.
+- `IPCONFIG` shows the address, and `PING` checks a machine answers.
+- `CONTROL net.ip=...` sets a fixed address instead of DHCP.
+- BDNET also runs over UDP port 17979, so sessions can cross routers.
+- **bterm** (in `bterm/`) is a drawterm for bdos. From Linux or macOS,
+  `bterm host` opens the machine's desktop in a window, and `bterm -t host`
+  opens a shell in your terminal. Either way, the directory you started from
+  is `T:` on the bdos side. See [bterm/README.md](bterm/README.md).
+
 ## Layout
 
 ```
@@ -131,6 +142,7 @@ kernel/dos/             8086 emulator
 kernel/net/             BDNET and the remote services
 fs/                     bdosfs (shared with the host tool)
 tools/                  mkbdosfs, image builder, font generator, QEMU test harnesses
+bterm/                  bterm, the drawterm for bdos (Linux/macOS, C + SDL2)
 dos/                    sample DOS programs (nasm)
 rootfs/                 what ends up on C:
 docs/                   PORTING-YEELOONG.md
@@ -141,8 +153,9 @@ docs/                   PORTING-YEELOONG.md
 - PS/2 input only: there's no USB stack, so real hardware needs the
   firmware's legacy emulation. Under QEMU, VMware and VirtualBox the mouse
   uses the vmmouse absolute pointer, so it tracks the host cursor exactly.
-- BDNET works on a single LAN segment. It doesn't use IP, so it can't cross
-  routers.
+- Name lookup (`\\BOX2`) only works on the local network. To reach a machine
+  across a router, give bterm its address. There's no TCP or DNS yet, and
+  bterm's traffic isn't encrypted.
 - Tasks are cooperative. A program that never calls into the system can hog
   the CPU. The interpreters and the 8086 emulator yield on their own.
 - The 8086 emulator has no timer interrupts or sound, and there's no

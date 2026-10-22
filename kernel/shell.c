@@ -1501,7 +1501,7 @@ static int cmd_control(struct cmd *c)
 		if (t->desk && (!a0 || strcasecmp(a0, "LIST"))) {
 			if (control_open(t->desk, a0)) {
 				kprintf("No such Control Panel applet: %s\n"
-				    "Try DATE, NETWORK, DESKTOP, COLORS, MOUSE, KEYBOARD or SYSTEM.\n", a0);
+				    "Try DATE, NETWORK, DESKTOP, THEMES, MOUSE, KEYBOARD or SYSTEM.\n", a0);
 				return 1;
 			}
 			return 0;
@@ -1522,7 +1522,7 @@ static int cmd_control(struct cmd *c)
 	size_t kl = MIN((size_t)(eq - a0), sizeof key - 1);
 	memcpy(key, a0, kl);
 	key[kl] = 0;
-	/* let "CONTROL desktop.scheme=Hot Dog Stand" keep its spaces */
+	/* let "CONTROL desktop.theme=Hot Dog Stand" keep its spaces */
 	char val[96];
 	strncpy0(val, eq + 1, sizeof val);
 	for (int i = 1; arg(c, i); i++) {

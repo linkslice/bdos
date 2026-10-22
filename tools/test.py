@@ -141,8 +141,13 @@ class VM:
         self._input({"type": "abs", "data": {"axis": "x", "value": vx}},
                     {"type": "abs", "data": {"axis": "y", "value": vy}})
 
-    def button(self, down):
-        self._input({"type": "btn", "data": {"down": bool(down), "button": "left"}})
+    def button(self, down, which="left"):
+        self._input({"type": "btn", "data": {"down": bool(down), "button": which}})
+
+    def rclick(self):
+        self.button(1, "right")
+        self.button(0, "right")
+        time.sleep(0.5)
 
     # ---- the monitor
     def mon(self, c):
@@ -153,8 +158,14 @@ class VM:
         """{title: (x, y, w, h)} and the pointer, from DESK$ and MOUSE$"""
         out = self.cmd("type DESK$")
         wins = {}
-        for m in re.finditer(r'window (\d+) (-?\d+) (-?\d+) (\d+) (\d+)( focus)? "([^"]*)"', out):
+        self.minimized = set()
+        self.focus = None
+        for m in re.finditer(r'window (\d+) (-?\d+) (-?\d+) (\d+) (\d+)((?: [a-z]+)*) "([^"]*)"', out):
             wins[m.group(7)] = tuple(map(int, m.groups()[1:5]))
+            if "minimized" in m.group(6):
+                self.minimized.add(m.group(7))
+            if "focus" in m.group(6):
+                self.focus = m.group(7)
         mp = re.findall(r"\n(\d+) (\d+) (\d+)", self.cmd("type MOUSE$"))[-1]
         return wins, (int(mp[0]), int(mp[1]))
 
@@ -221,7 +232,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.9" in out, out
+    assert "bdos 0.10" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -229,7 +240,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.9 (x86-64)")
+    vm.cmd("ver", "bdos version 0.10 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -376,7 +387,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.9", 10, start)
+    vm.wait_for("bdos version 0.10", 10, start)
 
 
 def t_basic(vm):
@@ -445,7 +456,7 @@ def t_c(vm):
 
 def t_control(vm):
     vm.cmd("cd \\")
-    vm.cmd("control", ["mouse.speed=5", "desktop.scheme=Default", "clock.24h=1"])
+    vm.cmd("control", ["mouse.speed=5", "desktop.theme=bdos Classic", "clock.24h=1"])
     vm.cmd("date 2026-07-04")
     vm.cmd("date /t", "Sat 2026-07-04")
     vm.cmd("time 9:30 pm")
@@ -507,13 +518,13 @@ def t_control(vm):
     vm.send("\t\t15\r")                         # Day: 15, Enter = OK
     time.sleep(1)
     vm.cmd("date /t", "2026-07-15")
-    vm.cmd("control desktop.scheme=Ocean", "Ocean")
+    vm.cmd("control desktop.theme=Ocean", "Ocean")
     vm.send("control colours\r")
     time.sleep(1.5)
     vm.screenshot("10-colours")
     vm.keys("esc")
     time.sleep(0.5)
-    vm.cmd("control desktop.scheme=Default")
+    vm.cmd("control desktop.theme=bdos Classic")
     vm.cmd("control desktop.color=2f6f73")
     # Program Manager's close box asks before leaving, and the question shows
     wins, _ = vm.windows()
@@ -560,7 +571,7 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.9")
+    vm.cmd("ver", "bdos version 0.10")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
@@ -593,7 +604,135 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.9")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.10")              # back at the full-screen prompt
+
+
+def t_win31(vm):
+    vm.cmd("cd \\")
+    vm.cmd("md \\fmtest")
+    vm.cmd("echo one > \\fmtest\\one.txt")
+    vm.cmd("echo two > \\fmtest\\two.txt")
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    # themes are files, and Hot Dog Stand is one of them
+    vm.cmd("dir \\bdos\\themes", ["Hot Dog Stand.THM", "Ocean.THM"])
+    vm.cmd("control desktop.theme=Hot Dog Stand", "Hot Dog Stand")
+    vm.cmd("type DESK$", "color #ff0000")
+    vm.screenshot("12-hot-dog-stand")
+    vm.cmd("control desktop.theme=bdos Classic")
+    vm.cmd("type DESK$", "color #2f6f73")
+    # File Manager, opened on a folder; it takes the focus, so click the
+    # Shell's title (clear of it) before asking DESK$ anything
+    vm.cmd("echo files C:\\FMTEST > DESK$")
+    time.sleep(1)
+    def shell_focus():
+        vm.point(600, 88)
+        time.sleep(0.3)
+        vm.click()
+    shell_focus()
+    wins, _ = vm.windows()
+    assert "File Manager - C:\\fmtest" in wins, wins
+    fx, fy, fw, fh = wins["File Manager - C:\\fmtest"]
+    def fm_focus():                             # its corner pokes out below the Shell
+        vm.point(fx + fw - 12, fy + fh - 8)
+        time.sleep(0.3)
+        vm.click()
+    # Ctrl+N in File Manager makes a folder (keys reach the focused window)
+    vm.point(fx + fw - 12, fy + fh - 8)
+    time.sleep(0.3)
+    vm.click()
+    vm.keys("ctrl-n")
+    time.sleep(0.6)
+    vm.send("NEWDIR\r")
+    time.sleep(0.8)
+    vm.screenshot("13-file-manager")
+    shell_focus()
+    vm.cmd("dir \\fmtest", "NEWDIR")
+    # drag one.txt from File Manager into Program Manager's Games group:
+    # it becomes an item there, a .lnk that opens it
+    fm_focus()
+    vm.point(400, 220)
+    time.sleep(0.3)
+    vm.button(1)
+    for x, y in ((390, 225), (300, 300), (150, 380), (60, 400)):
+        vm.point(x, y)
+        time.sleep(0.1)
+    vm.screenshot("13b-dragging")
+    vm.button(0)
+    time.sleep(1)
+    shell_focus()
+    vm.cmd("type \\progman\\games\\one.lnk", 'EDIT "C:\\fmtest\\one.txt"')
+    vm.cmd("del \\progman\\games\\one.lnk")
+    # a desktop that follows the sun, and the Desktop applet that controls it
+    vm.cmd("control desktop.theme=Sunrise to Sunset")
+    vm.cmd("control list", "desktop.timeofday=1")
+    vm.send("control desktop\r")
+    time.sleep(1.5)
+    vm.screenshot("13c-desktop-applet")
+    vm.keys("esc")
+    time.sleep(0.5)
+    shell_focus()
+    vm.cmd("control desktop.theme=bdos Classic")
+    vm.cmd("control list", "desktop.timeofday=0")
+    # right-click the desktop: its menu
+    vm.move_to(1000, 600)
+    vm.rclick()
+    vm.screenshot("14-desktop-menu")
+    vm.keys("esc")
+    time.sleep(0.4)
+    # right-click a title: the control menu; Minimize from it, by key
+    wins, _ = vm.windows()
+    fx, fy, fw, fh = wins["File Manager - C:\\fmtest"]
+    fm_focus()
+    vm.point(fx + fw // 2, fy + 10)
+    time.sleep(0.3)
+    vm.rclick()
+    vm.screenshot("15-control-menu")
+    vm.keys("n")                                    # Mi_n_imize
+    time.sleep(0.6)
+    shell_focus()
+    wins, _ = vm.windows()
+    assert "File Manager - C:\\fmtest" in vm.minimized, vm.minimized
+    vm.screenshot("16-minimized")
+    # and a double-click on the icon brings it back
+    vm.point(40, 768 - 30)
+    time.sleep(0.3)
+    vm.double_click()
+    vm.screenshot("16b-restored")
+    shell_focus()
+    wins, _ = vm.windows()
+    assert "File Manager - C:\\fmtest" not in vm.minimized, vm.minimized
+    # Program Manager: right-click on an icon
+    wins, _ = vm.windows()
+    px, py, pw, ph = wins["Program Manager"]
+    vm.point(px + 60, py + 120)
+    time.sleep(0.3)
+    vm.rclick()
+    vm.screenshot("17-icon-menu")
+    vm.keys("esc")
+    time.sleep(0.4)
+    # shrink Program Manager: its workspace grows scroll bars
+    vm.point(px + pw - 2, py + ph - 2)
+    time.sleep(0.3)
+    vm.button(1)
+    for i in range(1, 5):
+        vm.point(px + pw - 2 - (pw - 380) * i // 4, py + ph - 2 - (ph - 260) * i // 4)
+    vm.button(0)
+    time.sleep(0.5)
+    vm.screenshot("18-progman-small")
+    shell_focus()
+    wins, _ = vm.windows()
+    assert wins["Program Manager"][2:] == (380 - px + 2, 260 - py + 2) or wins["Program Manager"][2] < pw, wins
+    start = len(vm.log)
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
 
 
 def t_screens(vm):
@@ -610,7 +749,7 @@ try:
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
                      ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("control", t_control), ("dos", t_dos),
-                     ("desktop", t_desktop), ("screens", t_screens),
+                     ("desktop", t_desktop), ("win31", t_win31), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):
             check(name, fn, vm)

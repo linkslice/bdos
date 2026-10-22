@@ -89,11 +89,11 @@ int wm_depth(struct wm *wm);
 uint32_t wm_desktop_colour(struct wm *wm);
 void wm_set_desktop_colour(struct wm *wm, uint32_t rgb);
 void wm_message(struct wm *wm, const char *title, const char *msg);
-uint32_t ui_colour(int which);	/* 0 face, 1 active title, 2 selection */
-struct scheme {
-	const char *name;
-	uint32_t face, active, inactive, title_text, select, client;
-};
-const struct scheme *wm_schemes(int *n);
+uint32_t ui_colour(int which);
+/* small modal-ish questions, answered through a callback */
+void ui_confirm(struct wm *wm, const char *title, const char *msg, const char *yes,
+    void (*done)(struct wm *wm, void *arg, int yes), void *arg);
+void ui_prompt(struct wm *wm, const char *title, const char *label, const char *initial,
+    void (*done)(struct wm *wm, void *arg, const char *text), void *arg);	/* 0 face, 1 active title, 2 selection */
 
 #endif

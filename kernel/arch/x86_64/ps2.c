@@ -292,6 +292,11 @@ void ps2_init(void)
 	irq_enable();
 }
 
+int input_mods(void)
+{
+	return (shift ? 1 : 0) | (ctrl ? 2 : 0) | (alt ? 4 : 0);
+}
+
 int ps2_mouse_present(void)
 {
 	return mouse_ok;

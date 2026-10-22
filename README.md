@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.9 (x86-64) - Bryan Disk Operating System
+bdos 0.10 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -84,8 +84,27 @@ the memory map and RSDP, and exits boot services. It passes a
 - See `C:\Docs\C Programs.txt` on the disk.
 
 **The desktop.** It looks like Windows 3.1 and works like Plan 9:
-- Program Manager groups are folders under `C:\PROGMAN`, and its items are
-  `.lnk` files.
+- Program Manager is a real MDI window. Each group is a folder under
+  `C:\PROGMAN` and each icon is a file in it (a `.lnk` holds a command).
+  Groups move, resize, minimize, maximize and scroll; drag icons between
+  groups, or drop any file in to make an item that opens it.
+- File Manager has a folder tree, a sortable file list, multiple selection,
+  and copy, move, rename, delete, new folder and properties. Drag files
+  between folders, drives, File Manager windows, Program Manager, or into a
+  shell (which types their names).
+- Right-click almost anything for a menu: the desktop, a title bar, icons,
+  groups and files. Menus have Windows 3.1 keyboard letters, and Alt+letter
+  opens a window's menu bar.
+- Every window minimizes to an icon along the bottom of the desktop. The
+  control-menu box, a right-click on the title, or Alt+Space give Restore,
+  Minimize, Maximize and Close.
+- Themes are files in `C:\BDOS\THEMES`: window colours, desktop colour and
+  an optional desktop pattern. The defaults are bdos Classic, Ocean, Plum,
+  Graphite, Rose, Desert, Plan 9, Sunrise to Sunset, and of course Hot Dog
+  Stand. Save your own from the Themes applet.
+- The desktop can follow the time of day: night blue, a sunrise, a day sky,
+  a sunset. Tick it in the Desktop applet, where Play a Day shows you a
+  whole day in five seconds.
 - Each terminal window is a full shell.
 - Programs talk to the desktop through devices: `DESK$`, `DRAW$` and
   `MOUSE$`. For example, `echo color #3a3a6e > DESK$`.
@@ -96,7 +115,7 @@ the memory map and RSDP, and exits boot services. It passes a
   maximize.
 - The Control Panel has applets for Date/Time (with a calendar), Network
   (rename the machine, browse the LAN, open a remote shell or desktop),
-  Desktop (colour, start at boot), Colours (window schemes), Mouse,
+  Desktop (colour, time of day, start at boot), Themes, Mouse,
   Keyboard and System. There's a Clock too.
 
 **Settings** live in `C:\BDOS\SETTINGS.INI` and change the same way from

@@ -10,7 +10,7 @@
 
 #define BDOS_NAME	"bdos"
 #define BDOS_LONGNAME	"Bryan Disk Operating System"
-#define BDOS_VERSION	"0.9"
+#define BDOS_VERSION	"0.10"
 
 #define NELEM(a)	(sizeof(a) / sizeof((a)[0]))
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
@@ -83,6 +83,7 @@ struct mouse_event {
 void input_key(int key);		/* from drivers, any context */
 void input_mouse_abs(int x, int y, int buttons);	/* tablets, vmmouse: 0..65535 */
 int input_mouse_is_abs(void);
+int input_mods(void);		/* keys held now: 1 shift, 2 ctrl, 4 alt */
 void input_key_press(int id, int key);	/* a physical key went down (id = scancode) */
 void input_key_release(int id);
 void input_settings_init(void);

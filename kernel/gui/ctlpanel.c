@@ -12,11 +12,12 @@
 #include "../net/net.h"
 #include "gfx.h"
 #include "form.h"
+#include "themes.h"
 
 static void open_date(struct wm *wm);
 static void open_network(struct wm *wm);
 static void open_desktop(struct wm *wm);
-static void open_colours(struct wm *wm);
+static void open_themes(struct wm *wm);
 static void open_mouse(struct wm *wm);
 static void open_keyboard(struct wm *wm);
 static void open_system(struct wm *wm);
@@ -53,7 +54,7 @@ static const struct applet {
 	{ "Date/Time", "calendar", "Set the date and time, and how the clock looks", "date", open_date },
 	{ "Network", "network", "Name this computer and see who else is on the network", "network", open_network },
 	{ "Desktop", "desktop", "Background colour, and starting the desktop at boot", "desktop", open_desktop },
-	{ "Colours", "palette", "Window colour schemes", "colors", open_colours },
+	{ "Themes", "palette", "Window colours, desktop colour and pattern, all at once", "themes", open_themes },
 	{ "Mouse", "mouse", "Pointer speed, double-click speed, button swap", "mouse", open_mouse },
 	{ "Keyboard", "keyboard", "How soon and how fast keys repeat", "keyboard", open_keyboard },
 	{ "System", "computer", "What this machine is and how it's doing", "system", open_system },
@@ -141,7 +142,8 @@ int control_open(void *wmv, const char *applet)
 	}
 	static const struct { const char *alias, *key; } aliases[] = {
 		{ "time", "date" }, { "datetime", "date" }, { "clock", "date" }, { "net", "network" },
-		{ "colours", "colors" }, { "color", "colors" }, { "colour", "colors" }, { "kbd", "keyboard" },
+		{ "colours", "themes" }, { "color", "themes" }, { "colour", "themes" }, { "colors", "themes" },
+		{ "theme", "themes" }, { "kbd", "keyboard" },
 		{ "sys", "system" }, { "display", "desktop" },
 	};
 	const char *key = applet;
@@ -515,6 +517,7 @@ static const uint32_t palette[] = {
 };
 
 struct deskapp {
+	int tod, play, playing, play_min;
 	int sw0, r, g, b, preview, boot, ok, cancel, apply;
 	uint32_t orig, cur;
 };
@@ -529,13 +532,26 @@ static void desk_sync(struct form *f)
 	form_set_val(f, d->b, d->cur & 255);
 }
 
+static uint32_t now_colour(void)
+{
+	int y, mo, dd, h, mi, sec;
+	arch_rtc(&y, &mo, &dd, &h, &mi, &sec);
+	return time_of_day_colour(h * 60 + mi);
+}
+
 static void desk_preview(struct form *f, int id, struct surface *s, struct rect r)
 {
 	(void)id;
 	struct deskapp *d = form_priv(f);
 	fill(s, r.x, r.y, r.w, r.h, col(0x303030));
 	int m = 6;
-	fill(s, r.x + m, r.y + m, r.w - 2 * m, r.h - 2 * m - 10, col(d->cur));
+	uint32_t c = d->playing ? time_of_day_colour(d->play_min) : form_val(f, d->tod) ? now_colour() : d->cur;
+	fill(s, r.x + m, r.y + m, r.w - 2 * m, r.h - 2 * m - 10, col(c));
+	if (d->playing) {
+		char t[16];
+		snprintf(t, sizeof t, "%02d:%02d", d->play_min / 60, d->play_min % 60);
+		text(s, r.x + r.w - 52, r.y + r.h - 34, t, col(0xFFFFFF));
+	}
 	/* a little window on it */
 	int wx = r.x + 18, wy = r.y + 16, ww = r.w - 50, wh = r.h - 54;
 	fill(s, wx, wy, ww, wh, col(ui_colour(0)));
@@ -645,6 +661,8 @@ static void desk_apply(struct form *f)
 		wm_set_desktop_colour(wm, d->cur);	/* nested: this one only, not saved */
 	}
 	d->orig = d->cur;
+	if (wm_depth(wm) == 0)
+		setting_set_int("desktop.timeofday", form_val(f, d->tod));
 	int want = (int)form_val(f, d->boot);
 	if (want != autoexec_starts_desktop())
 		autoexec_set_desktop(want);
@@ -654,15 +672,40 @@ static void desk_event(struct form *f, int id, int ev)
 {
 	struct deskapp *d = form_priv(f);
 	if (ev == FE_CLOSE) {
+		if (d->playing)	/* put the real colour back */
+			wm_set_desktop_colour(form_wm(f), setting_int("desktop.timeofday") ? now_colour() : d->orig);
 		kfree(d);
+		return;
+	}
+	if (ev == FE_TICK && d->playing) {	/* a whole day in five seconds */
+		d->play_min += 12;
+		if (d->play_min >= 24 * 60) {
+			d->playing = 0;
+			form_tick(f, 0);
+			form_set_text(f, d->play, "Play a Day");
+			wm_set_desktop_colour(form_wm(f), setting_int("desktop.timeofday") ? now_colour() : d->orig);
+		} else {
+			wm_set_desktop_colour(form_wm(f), time_of_day_colour(d->play_min));
+		}
+		return;
+	}
+	if (ev == FE_CLICK && id == d->play) {
+		d->playing = !d->playing;
+		d->play_min = 5 * 60;
+		form_tick(f, d->playing ? 40 : 0);
+		form_set_text(f, d->play, d->playing ? "Stop" : "Play a Day");
+		if (!d->playing)
+			wm_set_desktop_colour(form_wm(f), setting_int("desktop.timeofday") ? now_colour() : d->orig);
 		return;
 	}
 	int i = id - d->sw0;
 	if (ev == FE_CLICK && i >= 0 && i < (int)NELEM(palette)) {
 		d->cur = palette[i];
+		form_set_val(f, d->tod, 0);	/* a colour of your own: the sun stops choosing */
 		desk_sync(f);
 	} else if (ev == FE_CHANGE && (id == d->r || id == d->g || id == d->b)) {
 		d->cur = (uint32_t)(form_val(f, d->r) << 16 | form_val(f, d->g) << 8 | form_val(f, d->b));
+		form_set_val(f, d->tod, 0);
 		for (int k = 0; k < (int)NELEM(palette); k++)
 			form_set_val(f, d->sw0 + k, palette[k] == d->cur);
 	} else if (ev == FE_CLICK && (id == d->ok || id == d->apply)) {
@@ -681,7 +724,7 @@ static void open_desktop(struct wm *wm)
 	struct deskapp *d = kzalloc(sizeof *d);
 	if (!d)
 		return;
-	int cw = 440, ch = 324;
+	int cw = 440, ch = 352;
 	struct form *f = form_new("Desktop", cw, ch, desk_event, d);
 	if (!f) {
 		kfree(d);
@@ -709,7 +752,11 @@ static void open_desktop(struct wm *wm)
 		form_add(f, FW_LABEL, 272, 150, 0, 0, "Nested desktops keep");
 		form_add(f, FW_LABEL, 272, 168, 0, 0, "their own colour.");
 	}
-	d->boot = form_add(f, FW_CHECK, 14, 248, 400, 22, "Start the desktop when bdos boots (AUTOEXEC.BAT)");
+	d->boot = form_add(f, FW_CHECK, 14, 244, 400, 22, "Start the desktop when bdos boots (AUTOEXEC.BAT)");
+	d->tod = form_add(f, FW_CHECK, 14, 270, 290, 22, "Change colour with the time of day");
+	form_set_val(f, d->tod, setting_int("desktop.timeofday"));
+	form_enable(f, d->tod, wm_depth(wm) == 0);
+	d->play = form_add(f, FW_BUTTON, cw - 124, 140, 112, 26, "Play a Day");
 	form_set_val(f, d->boot, autoexec_starts_desktop());
 	d->ok = ok_cancel(f, cw, ch, 1);
 	d->cancel = d->ok + 1;
@@ -718,92 +765,159 @@ static void open_desktop(struct wm *wm)
 	form_show(wm, f, -1, -1);
 }
 
-/* ---- Colours ------------------------------------------------------------------------------ */
+/* ---- Themes ------------------------------------------------------------------------------ */
 
-struct colapp {
-	int choice, preview, ok, cancel, apply;
-	const char *names[16];
+struct themeapp {
+	int list, preview, apply, saveas, del, ok, cancel;
+	char names[40][48];
 	int n;
+	struct theme_file cur;
 };
 
-static void col_preview(struct form *f, int id, struct surface *s, struct rect r)
+static void th_preview(struct form *f, int id, struct surface *s, struct rect r)
 {
 	(void)id;
-	struct colapp *c = form_priv(f);
-	int n;
-	const struct scheme *sc = wm_schemes(&n);
-	const struct scheme *p = &sc[MAX(0, MIN(form_val(f, c->choice), n - 1))];
-	fill(s, r.x, r.y, r.w, r.h, col(0x2F6F73));
-	/* an inactive window behind an active one, Windows 3.1 style */
-	int x = r.x + 12, y = r.y + 10, w = r.w - 70, h = 70;
-	fill(s, x, y, w, h, col(p->face));
+	struct themeapp *a = form_priv(f);
+	struct theme_file *t = &a->cur;
+	uint32_t desk = t->timeofday ? time_of_day_colour(12 * 60) : t->desktop;
+	fill(s, r.x, r.y, r.w, r.h, col(desk));
+	if (t->has_pattern)
+		for (int y = r.y; y < r.y + r.h; y++)
+			for (int x = r.x; x < r.x + r.w; x++)
+				if (t->pattern[(y - r.y) & 7] & (0x80 >> ((x - r.x) & 7)))
+					plot(s, x, y, col(t->pattern_ink));
+	bevel(s, r.x, r.y, r.w, r.h, 0);
+	/* an inactive window behind an active one */
+	int x = r.x + 12, y = r.y + 10, w = r.w - 70, h = 64;
+	fill(s, x, y, w, h, col(t->face));
 	bevel(s, x, y, w, h, 1);
-	fill(s, x + 4, y + 4, w - 8, 18, col(p->inactive));
-	text(s, x + 10, y + 5, "Inactive", col(p->title_text));
+	fill(s, x + 4, y + 4, w - 8, 18, col(t->inactive));
+	text(s, x + 10, y + 5, "Inactive", col(t->title_text));
 	x += 46;
-	y += 40;
+	y += 36;
 	w = r.w - 70;
-	h = r.h - 56;
-	fill(s, x, y, w, h, col(p->face));
+	h = r.h - 54;
+	fill(s, x, y, w, h, col(t->face));
 	bevel(s, x, y, w, h, 1);
-	fill(s, x + 4, y + 4, w - 8, 18, col(p->active));
-	text(s, x + 10, y + 5, "Active window", col(p->title_text));
-	fill(s, x + 6, y + 26, w - 12, h - 32, col(0xFFFFFF));
-	text(s, x + 12, y + 30, "Window text", col(0));
-	fill(s, x + 10, y + 50, 13 * FONT_W + 4, 16, col(p->select));
-	text(s, x + 12, y + 50, "Selected text", col(0xFFFFFF));
-	fill(s, x + w - 84, y + h - 34, 70, 24, col(p->face));
-	bevel(s, x + w - 84, y + h - 34, 70, 24, 1);
-	text(s, x + w - 84 + 19, y + h - 30, "OK", col(0));
+	fill(s, x + 4, y + 4, w - 8, 18, col(t->active));
+	text(s, x + 10, y + 5, "Active window", col(t->title_text));
+	fill(s, x + 4, y + 23, w - 8, 18, col(t->face));
+	text(s, x + 10, y + 24, "File  Options", col(t->menu_text));
+	fill(s, x + 6, y + 42, w - 12, h - 48, col(t->workspace));
+	fill(s, x + 12, y + 50, 13 * FONT_W + 4, 16, col(t->select));
+	text(s, x + 14, y + 50, "Selected text", col(0xFFFFFF));
+	if (t->timeofday)
+		text(s, r.x + 10, r.y + r.h - 22, "The desktop follows the sun", col(0xFFFFFF));
 }
 
-static void col_event(struct form *f, int id, int ev)
+static void th_fill(struct form *f, const char *select)
 {
-	struct colapp *c = form_priv(f);
-	if (ev == FE_CLOSE) {
-		kfree(c);
+	struct themeapp *a = form_priv(f);
+	a->n = themes_list(a->names, 40);
+	form_list_clear(f, a->list);
+	int sel = 0;
+	for (int i = 0; i < a->n; i++) {
+		form_list_add(f, a->list, a->names[i]);
+		if (!strcasecmp(a->names[i], select))
+			sel = i;
+	}
+	form_set_val(f, a->list, sel);
+	if (a->n)
+		theme_load(a->names[sel], &a->cur);
+}
+
+static void th_saved(struct wm *wm, void *arg, const char *name)
+{
+	struct form *f = arg;
+	if (!*name || strchr(name, '\\') || strchr(name, '/') || strchr(name, ':') || strchr(name, '.')) {
+		if (*name)
+			wm_message(wm, "Themes", "A theme name can't contain \\ / : or a dot.");
 		return;
 	}
-	if (ev != FE_CLICK)
+	if (form_find(wm, "Themes") != f)
+		return;	/* the applet closed meanwhile */
+	struct theme_file t;
+	theme_current(&t);
+	strncpy0(t.name, name, sizeof t.name);
+	int r = theme_save(&t);
+	if (r) {
+		wm_message(wm, "Themes", vfs_strerror(r));
 		return;
-	if (id == c->ok || id == c->apply) {
-		setting_set("desktop.scheme", c->names[form_val(f, c->choice)]);
-		if (id == c->ok)
+	}
+	setting_set("desktop.theme", name);
+	th_fill(f, name);
+	form_redraw(f);
+}
+
+static void th_deleted(struct wm *wm, void *arg, int yes)
+{
+	struct form *f = arg;
+	if (!yes || form_find(wm, "Themes") != f)
+		return;
+	struct themeapp *a = form_priv(f);
+	long i = form_val(f, a->list);
+	if (i < 0 || i >= a->n)
+		return;
+	char path[VFS_PATH_MAX], fn[64];
+	snprintf(fn, sizeof fn, "%s.THM", a->names[i]);
+	vfs_join(THEMES_DIR, fn, path, sizeof path);
+	vfs_delete(path);
+	th_fill(f, setting("desktop.theme"));
+	form_redraw(f);
+}
+
+static void th_event(struct form *f, int id, int ev)
+{
+	struct themeapp *a = form_priv(f);
+	if (ev == FE_CLOSE) {
+		kfree(a);
+		return;
+	}
+	long i = form_val(f, a->list);
+	const char *name = i >= 0 && i < a->n ? a->names[i] : "";
+	if (ev == FE_CHANGE && id == a->list) {
+		theme_load(name, &a->cur);
+	} else if ((ev == FE_CLICK && (id == a->apply || id == a->ok)) || (ev == FE_DBLCLICK && id == a->list)) {
+		if (*name)
+			setting_set("desktop.theme", name);	/* the theme's colours, desktop and all */
+		if (id == a->ok)
 			form_close(f);
-	} else if (id == c->cancel) {
+	} else if (ev == FE_CLICK && id == a->saveas) {
+		ui_prompt(form_wm(f), "Save Theme", "Save what's on screen now as a theme called:", "My Theme", th_saved, f);
+	} else if (ev == FE_CLICK && id == a->del && *name) {
+		char msg[120];
+		snprintf(msg, sizeof msg, "Delete the theme '%s'?%s", name,
+		    theme_is_builtin(name) ? "\n(It's one of the originals.)" : "");
+		ui_confirm(form_wm(f), "Delete Theme", msg, "Delete", th_deleted, f);
+	} else if (ev == FE_CLICK && id == a->cancel) {
 		form_close(f);
 	}
 }
 
-static void open_colours(struct wm *wm)
+static void open_themes(struct wm *wm)
 {
-	if (raise_existing(wm, "Colours"))
+	if (raise_existing(wm, "Themes"))
 		return;
-	struct colapp *c = kzalloc(sizeof *c);
-	if (!c)
+	struct themeapp *a = kzalloc(sizeof *a);
+	if (!a)
 		return;
-	int cw = 380, ch = 300;
-	struct form *f = form_new("Colours", cw, ch, col_event, c);
+	int cw = 520, ch = 330;
+	struct form *f = form_new("Themes", cw, ch, th_event, a);
 	if (!f) {
-		kfree(c);
+		kfree(a);
 		return;
 	}
-	const struct scheme *sc = wm_schemes(&c->n);
-	int cur = 0;
-	for (int i = 0; i < c->n && i < 16; i++) {
-		c->names[i] = sc[i].name;
-		if (!strcasecmp(sc[i].name, setting("desktop.scheme")))
-			cur = i;
-	}
-	form_add(f, FW_LABEL, 14, 16, 0, 0, "Colour scheme:");
-	c->choice = form_add(f, FW_CHOICE, 136, 12, 230, 24, NULL);
-	form_options(f, c->choice, c->names, c->n);
-	form_set_val(f, c->choice, cur);
-	c->preview = form_add(f, FW_CUSTOM, 14, 48, cw - 28, 196, NULL);
-	form_custom(f, c->preview, col_preview);
-	c->ok = ok_cancel(f, cw, ch, 1);
-	c->cancel = c->ok + 1;
-	c->apply = c->ok + 2;
+	form_add(f, FW_LABEL, 12, 10, 0, 0, "Themes (files in C:\\BDOS\\THEMES):");
+	a->list = form_add(f, FW_LIST, 12, 32, 180, 236, NULL);
+	a->preview = form_add(f, FW_CUSTOM, 204, 32, cw - 216, 236, NULL);
+	form_custom(f, a->preview, th_preview);
+	a->saveas = form_add(f, FW_BUTTON, 12, ch - 38, 88, 26, "Save As...");
+	a->del = form_add(f, FW_BUTTON, 106, ch - 38, 86, 26, "Delete...");
+	a->ok = ok_cancel(f, cw, ch, 1);
+	a->cancel = a->ok + 1;
+	a->apply = a->ok + 2;
+	th_fill(f, setting("desktop.theme"));
+	form_focus(f, a->list);
 	form_show(wm, f, -1, -1);
 }
 

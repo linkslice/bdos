@@ -15,7 +15,8 @@
 
 static const struct setting_info known[] = {
 	{ "desktop.color", "2f6f73", "colour of the top-level desktop (rrggbb)" },
-	{ "desktop.scheme", "Default", "window colours: Default Ocean Plum Graphite Hot Dog Stand" },
+	{ "desktop.theme", "bdos Classic", "theme from C:\\BDOS\\THEMES (Hot Dog Stand, Plan 9...)" },
+	{ "desktop.timeofday", "0", "1: the desktop colour follows the time of day" },
 	{ "mouse.speed", "5", "pointer speed, 1 (slow) to 10 (fast)" },
 	{ "mouse.dclick", "450", "double-click time in milliseconds" },
 	{ "mouse.swap", "0", "1 swaps the left and right buttons" },

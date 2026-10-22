@@ -225,6 +225,11 @@ static const struct icon icons[] = {
 		"..kwwwwwwwwwwk..", "..kwddddddddwk..", "..kwwwwwwwwwwk..", "..kwddddddddwk..",
 		"..kwwwwwwwwwwk..", "..kwddddddddwk..", "..kwwwwwwwwwwk..", "..kwdddddwwwwk..",
 		"..kwwwwwwwwwwk..", "..kwwwwwwwwwwk..", "..kkkkkkkkkkkk..", "................" } },
+	{ "cfile", {
+		"..kkkkkkkkk.....", "..kwwwwwwwkk....", "..kwwwwwwwkwk...", "..kwwwwwwwkkkk..",
+		"..kwwwwwwwwwwk..", "..kwwwbbbbwwwk..", "..kwwbbwwbbwwk..", "..kwbbwwwwwwwk..",
+		"..kwbbwwwwwwwk..", "..kwbbwwwwwwwk..", "..kwwbbwwbbwwk..", "..kwwwbbbbwwwk..",
+		"..kwwwwwwwwwwk..", "..kwwwwwwwwwwk..", "..kkkkkkkkkkkk..", "................" } },
 	{ "edit", {
 		"..kkkkkkkkkk....", "..kwwwwwwwwk....", "..kwddddddwk....", "..kwwwwwwwwk..k.",
 		"..kwddddddwk.kyk", "..kwwwwwwwwkkyyk", "..kwddddddwkyyk.", "..kwwwwwwwkyyk..",

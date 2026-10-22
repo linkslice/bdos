@@ -13,5 +13,8 @@ bdos roadmap
 [x] WIN \\HOST and CTTY \\HOST sessions with a T: drive; NET VIEW, NET USE
 [x] TCP/IP basics (DHCP, IPCONFIG, PING) and bterm for Linux/macOS
 [x] 8086 emulator for .COM and .EXE programs
+[x] Windows 3.1 shell: MDI Program Manager, File Manager, minimize,
+    right-click menus, drag and drop, themes, a time-of-day desktop
+[ ] DOS compatibility pass: timer IRQ, mode 13h in a window, INT 33h mouse
 [ ] TCP, DNS, telnet
 [ ] Lemote Yeeloong (MIPS64) port - planned, arch layer split (docs/PORTING-YEELOONG.md)

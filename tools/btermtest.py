@@ -69,7 +69,7 @@ try:
 
         pump(3)
         assert b"Connected to" in out, out
-        run("ver", "bdos version 0.9")
+        run("ver", "bdos version 0.10")
         run("dir T:", "Mine.txt")
         run("type t:\\mine.txt", "this file lives on the host")         # any case
         run('type "T:\\sub dir\\deep.txt"', "deep down")

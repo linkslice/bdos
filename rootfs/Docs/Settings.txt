@@ -19,9 +19,12 @@ The applets
 Date/Time   the clock, the calendar, 24-hour or am/pm
 Network     this computer's name; browse the LAN and open a shell or a
             desktop on another machine (T: is your folder there)
-Desktop     background colour; whether WIN starts at boot (it edits the
-            WIN line in AUTOEXEC.BAT for you)
-Colours     window colour schemes - try Hot Dog Stand
+Desktop     background colour; follow the time of day (Play a Day shows
+            it off); whether WIN starts at boot (it edits the WIN line in
+            AUTOEXEC.BAT for you)
+Themes      window colours, desktop colour and pattern together - try
+            Hot Dog Stand. Themes are .THM files in C:\BDOS\THEMES, plain
+            key=value text; Save As makes one from what's on screen
 Mouse       pointer speed, double-click speed, swap buttons
 Keyboard    key repeat delay and rate
 System      version, processor, memory, display, network, drives
@@ -39,7 +42,23 @@ Windows
 -------
 Drag any edge or corner of a window to resize it; shells reflow to the
 new size. Double-click a title bar, or press the button beside the close
-box, to maximize; do it again to restore. Window > Tile arranges them.
+box, to maximize; do it again to restore. The down arrow minimizes it to
+an icon at the bottom of the screen; double-click the icon to bring it
+back. Right-click a title bar (or press Alt+Space) for the control menu.
+Right-click the desktop for New Shell, File Manager, Themes, Tile...
+
+Program Manager and File Manager
+--------------------------------
+Program Manager's groups are the folders in C:\PROGMAN, and its icons are
+the files in them. A .LNK file's first line is the command it runs; any
+other file opens the way File Manager would open it. So you can manage
+groups from File Manager or the prompt too: MD C:\PROGMAN\TOOLS makes a
+group.
+
+File Manager keys: Enter opens, Backspace goes up, Del deletes, F2
+renames, F5 refreshes, F7 moves, F8 copies, Ctrl+N makes a folder, Ctrl+A
+selects everything, Tab switches between the tree and the list. Drag files
+to move them (Ctrl copies; dragging to another drive always copies).
 
 The network
 -----------

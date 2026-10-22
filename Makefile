@@ -99,11 +99,13 @@ test: $(B)/bdos.img
 nettest: $(B)/bdos.img
 	python3 tools/nettest.py $(B)/bdos.img $(B)/nettest
 
-bterm/bterm: bterm/bterm.c
-	$(MAKE) -C bterm
+# bterm lives in its own repository (github.com/linkslice/bterm); point
+# BTERM at a built copy, by default one checked out next to this one.
+BTERM ?= ../bterm/bterm
 
-btermtest: $(B)/bdos.img bterm/bterm
-	python3 tools/btermtest.py $(B)/bdos.img bterm/bterm $(B)/btermtest
+btermtest: $(B)/bdos.img
+	@test -x $(BTERM) || { echo "btermtest needs bterm: clone github.com/linkslice/bterm next to bdos and make it, or set BTERM="; exit 1; }
+	python3 tools/btermtest.py $(B)/bdos.img $(BTERM) $(B)/btermtest
 
 clean:
 	rm -rf $(B)

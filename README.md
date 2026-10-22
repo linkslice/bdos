@@ -27,7 +27,7 @@ make            # build/bdos.img: a 192 MiB disk, with an ESP plus a bdosfs part
 make run        # boot it in QEMU; COM1 is a terminal too
 make test       # 16 headless suites: shell, files, BASIC, C, DOS, desktop...
 make nettest    # two VMs on one virtual LAN: NET VIEW, CTTY/WIN \\BOX2, NET USE
-make btermtest  # bterm against a VM: DHCP, a text session, the desktop, T:, passwords
+make btermtest  # bterm (../bterm) against a VM: DHCP, a session, the desktop, T:
 ```
 
 The image also boots real UEFI PCs from a USB stick if you `dd` it across.
@@ -123,10 +123,10 @@ and a DHCP client.
 - `IPCONFIG` shows the address, and `PING` checks a machine answers.
 - `CONTROL net.ip=...` sets a fixed address instead of DHCP.
 - BDNET also runs over UDP port 17979, so sessions can cross routers.
-- **bterm** (in `bterm/`) is a drawterm for bdos. From Linux or macOS,
-  `bterm host` opens the machine's desktop in a window, and `bterm -t host`
-  opens a shell in your terminal. Either way, the directory you started from
-  is `T:` on the bdos side. See [bterm/README.md](bterm/README.md).
+- **[bterm](https://github.com/linkslice/bterm)** is a drawterm for bdos.
+  From Linux or macOS, `bterm host` opens the machine's desktop in a window,
+  and `bterm -t host` opens a shell in your terminal. Either way, the
+  directory you started from is `T:` on the bdos side.
 
 ## Layout
 
@@ -142,7 +142,6 @@ kernel/dos/             8086 emulator
 kernel/net/             BDNET and the remote services
 fs/                     bdosfs (shared with the host tool)
 tools/                  mkbdosfs, image builder, font generator, QEMU test harnesses
-bterm/                  bterm, the drawterm for bdos (Linux/macOS, C + SDL2)
 dos/                    sample DOS programs (nasm)
 rootfs/                 what ends up on C:
 docs/                   PORTING-YEELOONG.md

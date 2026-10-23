@@ -236,6 +236,7 @@ static void frame(struct dosbox *b)
 			struct rect area = { 0, 0, d->surf->w, d->surf->h };
 			vga_render(b, d->surf, area);
 			mouse_draw(b, d->surf, area);
+			surf_touched(d->surf, area);	/* pixels, for a viewer that draws for itself */
 			d->flush(d, area);
 		}
 		display_unlock(d);

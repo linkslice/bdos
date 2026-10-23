@@ -137,6 +137,7 @@ struct win *win_new(struct wm *wm, int kind, const char *title, int x, int y, in
 		return NULL;
 	}
 	fill(&w->content, 0, 0, cw, ch, P(0xFFFFFF));
+	gfx_track(&w->content, wm->disp->rec);
 	w->id = ++wm->next_id;
 	w->kind = kind;
 	w->minimizable = kind != W_DIALOG;
@@ -521,11 +522,13 @@ static void tw_scroll(struct termwin *t)
 		tw_redraw(t);	/* the selection moves with its text */
 		return;
 	}
-	/* move the pixels up one text row */
+	/* move the pixels up one text row (as a copy, so a viewer that draws
+	 * for itself just copies too) */
 	struct surface *s = &t->win->content;
-	for (int y = 0; y < s->h - FONT_H; y++)
-		memcpy(s->px + (size_t)y * (size_t)s->pitch, s->px + (size_t)(y + FONT_H) * (size_t)s->pitch,
-		    (size_t)s->w * 4);
+	struct rect save = s->clip;
+	surf_noclip(s);
+	blit(s, 0, 0, s, 0, FONT_H, s->w, s->h - FONT_H);
+	s->clip = save;
 	for (int c = 0; c < t->cols; c++) {
 		tw_cell(t, c, t->rows - 1);
 		if (t->rows > 1)
@@ -1778,6 +1781,7 @@ void win_resize(struct win *w, int x, int y, int fw, int fh)
 		blit(&ns, 0, 0, &w->content, 0, 0, MIN(cw, w->content.w), MIN(ch, w->content.h));
 	surf_free(&w->content);
 	w->content = ns;
+	gfx_track(&w->content, wm->disp->rec);
 	w->w = FRAME_W(cw);
 	w->h = FRAME_H(ch);
 	wm_dirty(wm, frame_rect(w));
@@ -1994,18 +1998,8 @@ static void draw_frame(struct surface *s, struct win *w, int active)
 static void draw_desktop(struct wm *wm, struct surface *s, struct rect r)
 {
 	fill(s, r.x, r.y, r.w, r.h, P(wm->desktop));
-	if (theme.has_pattern && !wm->depth) {
-		uint32_t ink = P(theme.pattern_ink);
-		for (int y = r.y; y < r.y + r.h; y++) {
-			uint8_t row = theme.pattern[y & 7];
-			if (!row)
-				continue;
-			uint32_t *px = s->px + (size_t)y * (size_t)s->pitch;
-			for (int x = r.x; x < r.x + r.w; x++)
-				if (row & (0x80 >> (x & 7)))
-					px[x] = ink;
-		}
-	}
+	if (theme.has_pattern && !wm->depth)
+		fill_pattern(s, r, theme.pattern, P(theme.pattern_ink));
 	/* a quiet watermark */
 	const char *mark = wm->depth ? "bdos (nested)" : "bdos";
 	text(s, s->w - (int)strlen(mark) * FONT_W - 12, s->h - 24, mark, P(0xB0C8C8));

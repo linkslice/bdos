@@ -234,6 +234,11 @@ in the spirit of NetBEUI, with an e1000 driver.
   From Linux or macOS, `bterm host` opens the machine's desktop in a window,
   and `bterm -t host` opens a shell in your terminal. Either way, the
   directory you started from is `T:` on the bdos side.
+  bterm draws the desktop itself, the way drawterm does: bdos sends what it
+  draws (fills, text, icons, copies between windows' surfaces) and bterm
+  runs the same drawing code on its own copies, so a window drag costs a
+  few dozen bytes. Only real pixels (a DOS game, another machine's desktop)
+  go as pixels, compressed. The font and icons go across once a session.
 - `CPU \\HOST command` runs a command on another machine with your
   directory as its `T:`: a CPU server, Plan 9 style.
 

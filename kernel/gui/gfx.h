@@ -8,12 +8,46 @@ struct rect {
 	int x, y, w, h;
 };
 
+struct gfx_rec;
+
 struct surface {
 	uint32_t *px;
 	int w, h, pitch;	/* pitch in pixels */
 	struct rect clip;	/* drawing is limited to this */
 	int owned;
+	/* drawing here is also recorded, for a viewer that draws for itself */
+	struct gfx_rec *rec;
+	uint16_t rid;
 };
+
+/*
+ * Recording: a remote viewer (bterm) that keeps its own copy of a surface
+ * gets the drawing operations instead of the pixels. Each op is
+ *   u8 op, u16 surface, i16 clip x y w h, then its arguments;
+ * colours are 0xRRGGBB. What can't be told as an op (pixels a program
+ * wrote itself) goes as GOP_PIXELS.
+ */
+enum {
+	GOP_FILL = 1, GOP_PLOT, GOP_LINE, GOP_TEXT, GOP_BLIT, GOP_ICON, GOP_PATTERN, GOP_PIXELS,
+	GOP_CREATE, GOP_FREE, GOP_SCREEN, GOP_FONT, GOP_ICONDEF,
+	GOP_VERIFY,	/* (testing) what the surface should look like now: like PIXELS */
+};
+
+struct gfx_rec {
+	void (*emit)(struct gfx_rec *r, const void *data, size_t n);
+	uint16_t next_id;
+	int font_sent;
+	uint8_t icon_sent[64];		/* one bit an icon */
+};
+
+/* start mirroring s to r's viewer: it gets the surface and what's on it */
+void gfx_track(struct surface *s, struct gfx_rec *r);
+/* pixels were written straight into s (not with these functions): send them */
+void surf_touched(struct surface *s, struct rect r);
+/* (testing) send what s looks like, for the viewer to check its copy against */
+void gfx_verify(struct surface *s);
+/* the 8x8 one-bit pattern over r, in ink (the desktop's) */
+void fill_pattern(struct surface *s, struct rect r, const uint8_t pat[8], uint32_t ink);
 
 #define FONT_W 8
 #define FONT_H 16

@@ -18,6 +18,8 @@
 enum {
 	M_KEY = 1, M_OUT, M_CTRL, M_EV, M_PIX, M_FREQ, M_FREP, M_BYE, M_PTR,
 	M_PIXZ,		/* M_PIX's payload squashed (lz.c): u32 its length, then the block */
+	M_DRAW,		/* drawing operations (gfx.h's GOP_...), for a viewer that draws */
+	M_DRAWZ,	/* the same, squashed: u32 their length, then the block */
 };
 
 enum { C_CLEAR = 1, C_GOTO, C_ATTR, C_CURSOR };
@@ -29,6 +31,7 @@ enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAM
 #define HELLO_CMD	2	/* run this one command and hang up (CPU \\HOST cmd) */
 #define HELLO_POINTER	2
 #define HELLO_LZ	4	/* the viewer understands M_PIXZ */
+#define HELLO_DRAW	8	/* the viewer draws for itself: send operations, not pixels */
 
 struct hello {
 	int32_t w, h;		/* columns/rows (TTY) or pixels (DESK) */
@@ -602,6 +605,11 @@ struct rdisp {
 	int lz;			/* the viewer takes M_PIXZ */
 	uint32_t *ztab;
 	uint8_t *zbuf;
+	/* a viewer that draws for itself: operations waiting to go */
+	int draw;
+	struct gfx_rec rec;
+	uint8_t *ops;
+	size_t nops, capops;
 	/* messages made while drawing (no big kernel lock), sent at commit */
 	struct outmsg { uint8_t type; uint8_t *buf; size_t len; } *outq;
 	int nout, capout;
@@ -641,6 +649,51 @@ static void rd_commit(struct display *d)
 	rd->nout = 0;
 }
 
+static void rd_send_ops(struct rdisp *rd)
+{
+	if (!rd->nops || !conn_alive(rd->c))
+		return;
+	uint8_t *ops = rd->ops;
+	size_t n = rd->nops;
+	rd->ops = NULL;		/* drawing that happens while this goes starts a new batch */
+	rd->nops = rd->capops = 0;
+	uint8_t *z = kmalloc(lz_bound(n));
+	size_t zn = z ? lz_compress(ops, n, z, lz_bound(n), rd->ztab) : 0;
+	if (zn && zn + 4 < n) {
+		uint32_t rl = (uint32_t)n;
+		rd_out(rd, M_DRAWZ, &rl, 4, z, zn);
+	} else {
+		rd_out(rd, M_DRAW, ops, n, NULL, 0);
+	}
+	kfree(z);
+	kfree(ops);
+}
+
+static void rd_emit(struct gfx_rec *r, const void *data, size_t n)
+{
+	struct rdisp *rd = (struct rdisp *)((char *)r - __builtin_offsetof(struct rdisp, rec));
+	if (rd->nops + n > rd->capops) {
+		size_t nc = MAX(rd->capops * 2, rd->nops + n + 16384);
+		uint8_t *nb = krealloc(rd->ops, nc);
+		if (!nb)
+			return;
+		rd->ops = nb;
+		rd->capops = nc;
+	}
+	memcpy(rd->ops + rd->nops, data, n);
+	rd->nops += n;
+	if (rd->nops > 64 * 1024)
+		rd_send_ops(rd);
+}
+
+/* this surface is what's on the viewer's screen */
+static void rd_screen(struct rdisp *rd)
+{
+	uint8_t b[11] = { GOP_SCREEN };
+	memcpy(b + 1, &rd->surf.rid, 2);
+	rd_emit(&rd->rec, b, sizeof b);
+}
+
 /* how much may be queued or in flight before new pictures wait */
 #define PIX_BACKLOG (64 * 1024)
 
@@ -664,6 +717,10 @@ static void rd_flush(struct display *d, struct rect r)
 	struct rdisp *rd = (struct rdisp *)d;
 	if (!conn_alive(rd->c)) {
 		d->alive = 0;
+		return;
+	}
+	if (rd->draw) {		/* the operations are the picture */
+		rd_send_ops(rd);
 		return;
 	}
 	r = rect_isect(r, (struct rect){ 0, 0, rd->surf.w, rd->surf.h });
@@ -757,13 +814,21 @@ static int rd_event(struct display *d, struct event *e)
 		memcpy(v, m->data, sizeof v);
 		*e = (struct event){ v[0], v[1], v[2], v[3], v[4] };
 		ok = 1;
-		if (e->type == EV_RESIZE) {
+		if (e->type == 99 && rd->draw) {	/* (testing) bterm checks its picture */
+			gfx_verify(&rd->surf);
+			rd_send_ops(rd);
+			ok = 0;
+		} else if (e->type == EV_RESIZE) {
 			/* bterm's window changed size: so does the desktop */
 			int w = MAX(320, MIN(e->x, 1600)), h = MAX(200, MIN(e->y, 1200));
 			struct surface ns;
 			if ((w != rd->surf.w || h != rd->surf.h) && !surf_init(&ns, w, h)) {
 				surf_free(&rd->surf);
 				rd->surf = ns;
+				if (rd->draw) {
+					gfx_track(&rd->surf, &rd->rec);
+					rd_screen(rd);
+				}
 			} else {
 				ok = 0;
 			}
@@ -805,6 +870,13 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		rd->zbuf = kmalloc(lz_bound(16 + 6 * PIX_MAX_RUNS));
 		rd->lz = rd->ztab && rd->zbuf;
 	}
+	if ((h.flags & HELLO_DRAW) && rd->lz) {
+		rd->draw = 1;
+		rd->rec.emit = rd_emit;
+		rd->d.rec = &rd->rec;
+		gfx_track(&rd->surf, &rd->rec);
+		rd_screen(rd);
+	}
 	rd->d.pointer = rd_pointer;
 	rd->d.commit = rd_commit;
 	rd->d.name = "network";
@@ -829,6 +901,7 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	surf_free(&rd->surf);
 	kfree(rd->ztab);
 	kfree(rd->zbuf);
+	kfree(rd->ops);
 	rd_commit(&rd->d);
 	kfree(rd->outq);
 	kfree(rd);
@@ -1034,8 +1107,10 @@ int remote_desktop(const char *host)
 						}
 					}
 				}
-				d->flush(d, rect_isect((struct rect){ r[0], r[1], r[2], r[3] },
-				    (struct rect){ 0, 0, d->surf->w, d->surf->h }));
+				struct rect dr = rect_isect((struct rect){ r[0], r[1], r[2], r[3] },
+				    (struct rect){ 0, 0, d->surf->w, d->surf->h });
+				surf_touched(d->surf, dr);
+				d->flush(d, dr);
 				display_unlock(d);
 			} else if (m->type == M_FREQ) {
 				serve_file(c, share, m);

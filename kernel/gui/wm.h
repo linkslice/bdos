@@ -49,6 +49,8 @@ struct display {
 	void (*unlock)(struct display *d);
 	const char *name;
 	void *priv;
+	/* the far end draws for itself: windows' surfaces are mirrored there */
+	struct gfx_rec *rec;
 };
 
 int desktop_run_on(struct display *d, const char *title);

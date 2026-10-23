@@ -349,14 +349,21 @@ static void reload(struct fm *fm)
 	fm_title(fm);
 }
 
+/* this desktop's File Managers: look again */
+void files_refresh(struct wm *wm)
+{
+	for (struct win *w = wm->wins; w; w = w->next)
+		if (w->ops == &fm_ops && !w->closed) {
+			reload(FM(w));
+			fm_render(w);
+		}
+}
+
+/* every desktop's: each does its own, under its own lock */
 void files_refresh_all(void)
 {
 	for (struct wm *wm = all_wms; wm; wm = wm->next_wm)
-		for (struct win *w = wm->wins; w; w = w->next)
-			if (w->ops == &fm_ops && !w->closed) {
-				reload(FM(w));
-				fm_render(w);
-			}
+		wm->want_files = 1;
 }
 
 /* the selection as '\n'-separated full paths ("" if none) */

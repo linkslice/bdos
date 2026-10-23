@@ -710,7 +710,7 @@ def t_dosgfx(vm):
     vm.wait_for("polling saw", 60, start)
     time.sleep(0.5)
     out = vm.text(start)
-    m = re.search(r"down (\d+) of (\d+), polling saw (\d+)", out)
+    m = re.search(r"down (\d+)\s+of (\d+), polling saw (\d+)", out)   # the line may wrap
     assert m and m.group(1) == m.group(2) == "2" and int(m.group(3)) >= 1, out[-300:]
     # a game's keyboard and mouse: INT 9 sees a key held for 1.5 s as held,
     # and with its range set to 0..319 the mouse is where the pointer is

@@ -163,7 +163,23 @@ struct dnd {
 	int count;
 };
 
+/*
+ * Each desktop has a lock of its own, so desktops -- one for each person
+ * connected -- draw on different cores at once. Whoever touches a desktop's
+ * windows holds it: its own task, shells writing into its windows, programs
+ * drawing in them. Taking it while holding the big kernel lock is fine:
+ * a task that has to wait lets the big lock go meanwhile. A nested desktop
+ * may take its host's lock while holding its own, never the other way.
+ */
+struct desklock {
+	struct task *volatile owner;
+	int depth;
+};
+
 struct wm {
+	struct desklock lock;
+	/* asked for by other desktops and tasks; done by this one's own task */
+	volatile int want_repaint, want_progman, want_files, want_dirty;
 	struct display *disp;
 	struct win *wins;
 	struct win *focus;
@@ -199,6 +215,8 @@ struct wm {
 extern struct wm *all_wms;
 
 /* ---- wm.c ---- */
+void desk_lock(struct wm *wm);
+void desk_unlock(struct wm *wm);
 uint32_t P(uint32_t rgb);
 void wm_dirty(struct wm *wm, struct rect r);
 void wm_dirty_all(struct wm *wm);

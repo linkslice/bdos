@@ -40,10 +40,20 @@ struct display {
 	/* when the far end draws the pointer: its shape (0 an arrow, else resize
 	 * edges: 1 left, 2 right, 4 top, 8 bottom). Optional */
 	void (*pointer)(struct display *d, int shape);
+	/* optional: what flush prepared, sent now (the big kernel lock is held
+	 * here, but not during flush) */
+	void (*commit)(struct display *d);
+	/* optional: the display's pixels belong to someone else (a window on
+	 * another desktop): hold this while drawing into them */
+	void (*lock)(struct display *d);
+	void (*unlock)(struct display *d);
 	const char *name;
 	void *priv;
 };
 
 int desktop_run_on(struct display *d, const char *title);
+/* around drawing straight into a display's surface (a DOS game, a viewer) */
+void display_lock(struct display *d);
+void display_unlock(struct display *d);
 
 #endif

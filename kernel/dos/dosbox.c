@@ -231,12 +231,14 @@ static void frame(struct dosbox *b)
 		if (!b->vga.dirty && !text_blink && !(b->mouse.on && b->mouse.shown > 0))
 			return;
 		bkl_enter();
+		display_lock(d);	/* the pixels may be a window's on a desktop */
 		if (d->alive && d->surf && d->surf->px) {
 			struct rect area = { 0, 0, d->surf->w, d->surf->h };
 			vga_render(b, d->surf, area);
 			mouse_draw(b, d->surf, area);
 			d->flush(d, area);
 		}
+		display_unlock(d);
 		bkl_leave();
 		(void)gfx;
 		return;

@@ -513,8 +513,12 @@ static int bcd(uint8_t v, int is_bcd)
 	return is_bcd ? (v & 0x0F) + (v >> 4) * 10 : v;
 }
 
+/* the CMOS index port is one for everyone: desktops' clocks read it from any core */
+static struct spinlock cmos_lock = SPINLOCK_INIT;
+
 void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s)
 {
+	uint64_t f = spin_lock_irqsave(&cmos_lock);
 	while (cmos(0x0A) & 0x80)
 		cpu_pause();
 	uint8_t regb = cmos(0x0B);
@@ -528,11 +532,12 @@ void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s)
 	*d = bcd(cmos(0x07), b);
 	*mo = bcd(cmos(0x08), b);
 	*y = 2000 + bcd(cmos(0x09), b);
+	spin_unlock_irqrestore(&cmos_lock, f);
 }
 
 void arch_rtc_set(int y, int mo, int d, int h, int mi, int s)
 {
-	uint64_t f = irq_save();
+	uint64_t f = spin_lock_irqsave(&cmos_lock);
 	while (cmos(0x0A) & 0x80)
 		cpu_pause();
 	uint8_t regb = cmos(0x0B);
@@ -552,7 +557,7 @@ void arch_rtc_set(int y, int mo, int d, int h, int mi, int s)
 	cmos_write(0x08, to_bcd(mo, b));
 	cmos_write(0x09, to_bcd(y % 100, b));
 	cmos_write(0x0B, regb & 0x7F);
-	irq_restore(f);
+	spin_unlock_irqrestore(&cmos_lock, f);
 }
 
 void arch_cpu_name(char *out, int n)

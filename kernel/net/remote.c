@@ -602,7 +602,44 @@ struct rdisp {
 	int lz;			/* the viewer takes M_PIXZ */
 	uint32_t *ztab;
 	uint8_t *zbuf;
+	/* messages made while drawing (no big kernel lock), sent at commit */
+	struct outmsg { uint8_t type; uint8_t *buf; size_t len; } *outq;
+	int nout, capout;
 };
+
+/* send it now, or keep it for commit if we're drawing without the kernel lock */
+static void rd_out(struct rdisp *rd, int type, const void *a, size_t alen, const void *b, size_t blen)
+{
+	if (bkl_held()) {
+		conn_send2(rd->c, type, a, alen, b, blen);
+		return;
+	}
+	if (rd->nout == rd->capout) {
+		int nc = rd->capout ? rd->capout * 2 : 16;
+		struct outmsg *nq = krealloc(rd->outq, sizeof *nq * (size_t)nc);
+		if (!nq)
+			return;
+		rd->outq = nq;
+		rd->capout = nc;
+	}
+	uint8_t *buf = kmalloc(alen + blen);
+	if (!buf)
+		return;
+	memcpy(buf, a, alen);
+	if (blen)
+		memcpy(buf + alen, b, blen);
+	rd->outq[rd->nout++] = (struct outmsg){ (uint8_t)type, buf, alen + blen };
+}
+
+static void rd_commit(struct display *d)
+{
+	struct rdisp *rd = (struct rdisp *)d;
+	for (int i = 0; i < rd->nout; i++) {
+		conn_send2(rd->c, rd->outq[i].type, rd->outq[i].buf, rd->outq[i].len, NULL, 0);
+		kfree(rd->outq[i].buf);
+	}
+	rd->nout = 0;
+}
 
 /* how much may be queued or in flight before new pictures wait */
 #define PIX_BACKLOG (64 * 1024)
@@ -693,9 +730,9 @@ static void rd_send_rect(struct rdisp *rd, struct rect r)
 			z = lz_compress(msg, raw, rd->zbuf, lz_bound(16 + 6 * PIX_MAX_RUNS), rd->ztab);
 		if (z && z + 4 < raw) {
 			uint32_t rl = (uint32_t)raw;
-			conn_send2(rd->c, M_PIXZ, &rl, 4, rd->zbuf, z);
+			rd_out(rd, M_PIXZ, &rl, 4, rd->zbuf, z);
 		} else {
-			conn_send2(rd->c, M_PIX, msg, raw, NULL, 0);
+			rd_out(rd, M_PIX, msg, raw, NULL, 0);
 		}
 	}
 	kfree(msg);
@@ -769,6 +806,7 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		rd->lz = rd->ztab && rd->zbuf;
 	}
 	rd->d.pointer = rd_pointer;
+	rd->d.commit = rd_commit;
 	rd->d.name = "network";
 
 	struct task *t = task_current();
@@ -791,6 +829,8 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	surf_free(&rd->surf);
 	kfree(rd->ztab);
 	kfree(rd->zbuf);
+	rd_commit(&rd->d);
+	kfree(rd->outq);
 	kfree(rd);
 }
 
@@ -971,6 +1011,7 @@ int remote_desktop(const char *host)
 				}
 			}
 			if (m->type == M_PIX && plen >= 16) {
+				display_lock(d);
 				int32_t r[4];
 				memcpy(r, pd, sizeof r);
 				const uint8_t *p = pd + 16;
@@ -995,6 +1036,7 @@ int remote_desktop(const char *host)
 				}
 				d->flush(d, rect_isect((struct rect){ r[0], r[1], r[2], r[3] },
 				    (struct rect){ 0, 0, d->surf->w, d->surf->h }));
+				display_unlock(d);
 			} else if (m->type == M_FREQ) {
 				serve_file(c, share, m);
 			} else if (m->type == M_BYE) {

@@ -81,6 +81,8 @@ the memory map and RSDP, and exits boot services. It passes a
   Tasks are preemptive (10 ms slices) and spread over the cores; a big
   kernel lock keeps the old single-core code safe, and the interpreters and
   the DOS emulator run outside it, so four DOS programs get four cores.
+  Each desktop has a lock of its own and draws outside the big one, so
+  several people connected with bterm draw on different cores at once.
   `CPU$` reports per-core load and parks or unparks cores (`echo off 2 > CPU$`).
 - A bitmap page allocator and a slab heap, both thread-safe.
 - Each task has its own console, current directory and desktop.

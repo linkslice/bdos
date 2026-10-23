@@ -587,7 +587,7 @@ void progman_reload(struct wm *wm)
 static void reload_everywhere(void)
 {
 	for (struct wm *wm = all_wms; wm; wm = wm->next_wm)
-		progman_reload(wm);
+		wm->want_progman = 1;	/* each desktop does its own, under its own lock */
 	files_refresh_all();
 }
 

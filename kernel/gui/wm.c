@@ -30,6 +30,49 @@ static int mirror_terms = 1;	/* copy terminal window text to COM1 (tests) */
 
 uint32_t P(uint32_t rgb) { return col(rgb); }
 
+/* ---- the desktop's lock ------------------------------------------------------------ */
+
+void desk_lock(struct wm *wm)
+{
+	struct task *me = task_current();
+	if (wm->lock.owner == me) {
+		wm->lock.depth++;
+		return;
+	}
+	for (;;) {
+		struct task *none = NULL;
+		if (__atomic_compare_exchange_n(&wm->lock.owner, &none, me, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+			wm->lock.depth = 1;
+			return;
+		}
+		/* busy: wait without the big lock, so the rest of the system goes on */
+		int depth = bkl_release_all();
+		while (__atomic_load_n(&wm->lock.owner, __ATOMIC_RELAXED))
+			task_yield();
+		bkl_reacquire(depth);
+	}
+}
+
+void desk_unlock(struct wm *wm)
+{
+	if (wm->lock.owner != task_current())
+		panic("desk_unlock: not ours");
+	if (--wm->lock.depth == 0)
+		__atomic_store_n(&wm->lock.owner, NULL, __ATOMIC_RELEASE);
+}
+
+void display_lock(struct display *d)
+{
+	if (d && d->lock)
+		d->lock(d);
+}
+
+void display_unlock(struct display *d)
+{
+	if (d && d->unlock)
+		d->unlock(d);
+}
+
 void wm_dirty(struct wm *wm, struct rect r)
 {
 	wm->dirty = rect_union(wm->dirty, r);
@@ -545,7 +588,20 @@ static void tw_putc(struct termwin *t, char ch)
 	tw_cursor_cell(t);
 }
 
-static void tw_rawchar(struct console *c, int ch)
+/* a shell writing into its window: that window's desktop, if it's still there */
+static int tw_lock(struct termwin *t)
+{
+	if (t->closed || !t->wm)
+		return 0;
+	desk_lock(t->wm);
+	if (t->closed) {
+		desk_unlock(t->wm);
+		return 0;
+	}
+	return 1;
+}
+
+static void tw_rawchar_u(struct console *c, int ch)
 {
 	struct termwin *t = c->priv;
 	if (t->cx >= t->cols || t->cy >= t->rows)
@@ -559,7 +615,16 @@ static void tw_rawchar(struct console *c, int ch)
 	tw_cursor_cell(t);
 }
 
-static void tw_write(struct console *c, const char *s, size_t n)
+static void tw_rawchar(struct console *c, int ch)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return;
+	tw_rawchar_u(c, ch);
+	desk_unlock(t->wm);
+}
+
+static void tw_write_u(struct console *c, const char *s, size_t n)
 {
 	struct termwin *t = c->priv;
 	for (size_t i = 0; i < n; i++) {
@@ -569,7 +634,16 @@ static void tw_write(struct console *c, const char *s, size_t n)
 	}
 }
 
-static int tw_getkey(struct console *c)
+static void tw_write(struct console *c, const char *s, size_t n)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return;
+	tw_write_u(c, s, n);
+	desk_unlock(t->wm);
+}
+
+static int tw_getkey_u(struct console *c)
 {
 	struct termwin *t = c->priv;
 	if (t->closed)
@@ -592,7 +666,17 @@ static int tw_getkey(struct console *c)
 	return k;
 }
 
-static void tw_clear(struct console *c)
+static int tw_getkey(struct console *c)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return KEY_EOF;
+	int k = tw_getkey_u(c);
+	desk_unlock(t->wm);
+	return k;
+}
+
+static void tw_clear_u(struct console *c)
 {
 	struct termwin *t = c->priv;
 	for (int i = 0; i < t->cols * t->rows; i++)
@@ -605,11 +689,29 @@ static void tw_clear(struct console *c)
 	tw_redraw(t);
 }
 
-static void tw_cursor(struct console *c, int on)
+static void tw_clear(struct console *c)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return;
+	tw_clear_u(c);
+	desk_unlock(t->wm);
+}
+
+static void tw_cursor_u(struct console *c, int on)
 {
 	struct termwin *t = c->priv;
 	t->cursor_on = on;
 	tw_cursor_cell(t);
+}
+
+static void tw_cursor(struct console *c, int on)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return;
+	tw_cursor_u(c, on);
+	desk_unlock(t->wm);
 }
 
 static void tw_size(struct console *c, int *w, int *h)
@@ -619,7 +721,7 @@ static void tw_size(struct console *c, int *w, int *h)
 	*h = t->rows;
 }
 
-static void tw_gotoxy(struct console *c, int x, int y)
+static void tw_gotoxy_u(struct console *c, int x, int y)
 {
 	struct termwin *t = c->priv;
 	int ox = t->cx, oy = t->cy;
@@ -633,6 +735,15 @@ static void tw_gotoxy(struct console *c, int x, int y)
 	if (ox < t->cols && oy < t->rows)
 		tw_cell(t, ox, oy);
 	tw_cursor_cell(t);
+}
+
+static void tw_gotoxy(struct console *c, int x, int y)
+{
+	struct termwin *t = c->priv;
+	if (!tw_lock(t))
+		return;
+	tw_gotoxy_u(c, x, y);
+	desk_unlock(t->wm);
 }
 
 static void tw_attr(struct console *c, int fg, int bg)
@@ -2441,6 +2552,44 @@ static void handle_wheel(struct wm *wm, struct event *e)
 	}
 }
 
+/* what other tasks and desktops asked of this one */
+static void wm_requests(struct wm *wm)
+{
+	if (__atomic_exchange_n(&wm->want_repaint, 0, __ATOMIC_ACQ_REL)) {
+		for (struct win *w = wm->wins; w; w = w->next)
+			if (!w->closed && w->ops && w->ops->repaint)
+				w->ops->repaint(w);
+		wm_dirty_all(wm);
+	}
+	if (__atomic_exchange_n(&wm->want_progman, 0, __ATOMIC_ACQ_REL)) {
+		extern void progman_reload(struct wm *wm);
+		progman_reload(wm);
+	}
+	if (__atomic_exchange_n(&wm->want_files, 0, __ATOMIC_ACQ_REL)) {
+		extern void files_refresh(struct wm *wm);
+		files_refresh(wm);
+	}
+	if (__atomic_exchange_n(&wm->want_dirty, 0, __ATOMIC_ACQ_REL))
+		wm_dirty_all(wm);
+}
+
+/*
+ * Drawing what changed. The desktop's lock is held, the big kernel lock
+ * isn't: desktops draw on whichever cores are free, side by side, and a
+ * slow one doesn't hold the others up. Whatever the display needs the
+ * kernel for (sending over the network) waits for its commit.
+ */
+static void wm_render(struct wm *wm, struct rect r)
+{
+	int depth = bkl_release_all();
+	display_lock(wm->disp);
+	compose(wm, r);
+	display_unlock(wm->disp);
+	bkl_reacquire(depth);
+	if (wm->disp->commit)
+		wm->disp->commit(wm->disp);
+}
+
 static void wm_loop(struct wm *wm)
 {
 	struct surface *s = wm->disp->surf;
@@ -2448,6 +2597,8 @@ static void wm_loop(struct wm *wm)
 	while (wm->running && wm->disp->alive) {
 		struct event e;
 		int busy = 0;
+		desk_lock(wm);
+		wm_requests(wm);
 		while (wm->disp->next_event(wm->disp, &e)) {
 			busy = 1;
 			if (e.type == EV_KEY)
@@ -2486,9 +2637,10 @@ static void wm_loop(struct wm *wm)
 		if (!rect_empty(wm->dirty)) {
 			struct rect r = wm->dirty;
 			wm->dirty = (struct rect){ 0, 0, 0, 0 };
-			compose(wm, r);
+			wm_render(wm, r);
 			busy = 1;
 		}
+		desk_unlock(wm);
 		if (!busy)
 			task_idle();
 		else
@@ -2499,8 +2651,10 @@ static void wm_loop(struct wm *wm)
 /* Close everything; wait (briefly) for shells to notice. */
 static void wm_shutdown(struct wm *wm)
 {
+	desk_lock(wm);
 	while (wm->wins)
 		win_destroy(wm, wm->wins);
+	desk_unlock(wm);
 	uint64_t until = uptime_ms() + 2000;
 	while (zombies && uptime_ms() < until) {
 		reap_zombies();
@@ -2627,6 +2781,21 @@ static void td_flush(struct display *d, struct rect r)
 		win_dirty(td->t->win, r);
 }
 
+/* the pixels are a window's on the host desktop: its lock */
+static void td_lock(struct display *d)
+{
+	struct term_disp *td = (struct term_disp *)d;
+	if (td->t->wm)
+		desk_lock(td->t->wm);
+}
+
+static void td_unlock(struct display *d)
+{
+	struct term_disp *td = (struct term_disp *)d;
+	if (td->t->wm)
+		desk_unlock(td->t->wm);
+}
+
 static void td_attach(struct display *d, struct wm *wm)
 {
 	(void)wm;
@@ -2691,6 +2860,8 @@ struct display *display_open(struct console *c, int *err)
 		td->d.alive = 1;
 		td->d.name = "window";
 		td->d.attach = td_attach;
+		td->d.lock = td_lock;
+		td->d.unlock = td_unlock;
 		memset(&t->child_ev, 0, sizeof t->child_ev);
 		return &td->d;
 	}
@@ -2709,6 +2880,12 @@ int display_want_size(struct display *d, int w, int h)
 	struct win *win = t->win;
 	if (!win || t->closed || !win->wm)
 		return -1;
+	struct wm *host = win->wm;
+	desk_lock(host);
+	if (t->closed || !t->win) {
+		desk_unlock(host);
+		return -1;
+	}
 	if (!td->orig_w) {
 		td->orig_w = win->w;
 		td->orig_h = win->h;
@@ -2724,10 +2901,11 @@ int display_want_size(struct display *d, int w, int h)
 	w = MIN(w, scr->w);
 	h = MIN(h, scr->h);
 	int x = MIN(win->x, scr->w - w), y = MIN(win->y, scr->h - h);
-	if (win->maximized)
-		return 0;
-	win_resize(win, MAX(0, x), MAX(0, y), w, h);
-	d->surf = &win->content;
+	if (!win->maximized) {
+		win_resize(win, MAX(0, x), MAX(0, y), w, h);
+		d->surf = &win->content;
+	}
+	desk_unlock(host);
 	return 0;
 }
 
@@ -2744,10 +2922,15 @@ void display_close(struct display *d)
 	struct termwin *t = td->t;
 	if (td->orig_w)
 		display_want_size(d, 0, 0);
-	t->child = 0;
-	if (!t->closed && t->win) {
-		tw_redraw(t);
-		win_dirty_all(t->win);
+	if (tw_lock(t)) {
+		t->child = 0;
+		if (t->win) {
+			tw_redraw(t);
+			win_dirty_all(t->win);
+		}
+		desk_unlock(t->wm);
+	} else {
+		t->child = 0;
 	}
 	kfree(td);
 }
@@ -2820,7 +3003,7 @@ static uint32_t argcol(struct sysval *a, int argc, int i, uint32_t def)
 	return P(i < argc ? (uint32_t)a[i].n & 0xFFFFFF : def);
 }
 
-static int sys_win_open(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_open_u(int argc, struct sysval *a, struct sysval *r)
 {
 	struct wm *wm = my_desk();
 	if (!wm)
@@ -2846,7 +3029,7 @@ static int sys_win_open(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_close(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_close_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2862,7 +3045,7 @@ static int sys_win_close(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_clear(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_clear_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2873,7 +3056,7 @@ static int sys_win_clear(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_rect(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_rect_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2887,7 +3070,7 @@ static int sys_win_rect(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_line(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_line_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2902,7 +3085,7 @@ static int sys_win_line(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_pixel(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_pixel_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2915,7 +3098,7 @@ static int sys_win_pixel(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_text(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_text_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
@@ -2930,7 +3113,7 @@ static int sys_win_text(int argc, struct sysval *a, struct sysval *r)
 }
 
 /* Win_Event id: 0 nothing, 1 key, 2 click, 3 mouse moved, 4 resized, -1 closed */
-static int sys_win_event(int argc, struct sysval *a, struct sysval *r)
+static int sys_win_event_u(int argc, struct sysval *a, struct sysval *r)
 {
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
 	if (!w)
@@ -2961,7 +3144,7 @@ static int sys_win_event(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_win_info(int argc, struct sysval *a, struct sysval *r, int what)
+static int sys_win_info_u(int argc, struct sysval *a, struct sysval *r, int what)
 {
 	struct win *w = argc ? canvas_get(a[0].n) : NULL;
 	if (!w)
@@ -2969,6 +3152,46 @@ static int sys_win_info(int argc, struct sysval *a, struct sysval *r, int what)
 	r->n = what == 0 ? w->last_key : what == 1 ? w->last_x : what == 2 ? w->last_y :
 	    what == 3 ? w->content.w : w->content.h;
 	return 0;
+}
+
+
+static int sys_desk_color_u(int argc, struct sysval *a, struct sysval *r);
+static int sys_desk_run_u(int argc, struct sysval *a, struct sysval *r);
+static int sys_desk_size_u(int argc, struct sysval *a, struct sysval *r);
+
+/* programs drawing on the desktop (BASIC, C): under its lock */
+#define DESK_LOCKED(name) \
+	static int name(int argc, struct sysval *a, struct sysval *r) \
+	{ \
+		struct wm *wm = my_desk(); \
+		if (wm) \
+			desk_lock(wm); \
+		int x = name##_u(argc, a, r); \
+		if (wm) \
+			desk_unlock(wm); \
+		return x; \
+	}
+DESK_LOCKED(sys_win_open)
+DESK_LOCKED(sys_win_close)
+DESK_LOCKED(sys_win_clear)
+DESK_LOCKED(sys_win_rect)
+DESK_LOCKED(sys_win_line)
+DESK_LOCKED(sys_win_pixel)
+DESK_LOCKED(sys_win_text)
+DESK_LOCKED(sys_win_event)
+DESK_LOCKED(sys_desk_color)
+DESK_LOCKED(sys_desk_run)
+DESK_LOCKED(sys_desk_size)
+
+static int sys_win_info(int argc, struct sysval *a, struct sysval *r, int what)
+{
+	struct wm *wm = my_desk();
+	if (wm)
+		desk_lock(wm);
+	int x = sys_win_info_u(argc, a, r, what);
+	if (wm)
+		desk_unlock(wm);
+	return x;
 }
 
 static int sys_win_key(int c, struct sysval *a, struct sysval *r) { return sys_win_info(c, a, r, 0); }
@@ -2995,7 +3218,7 @@ static int sys_win_wait_close(int argc, struct sysval *a, struct sysval *r)
 	return sys_win_close(argc, a, r);
 }
 
-static int sys_desk_color(int argc, struct sysval *a, struct sysval *r)
+static int sys_desk_color_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct wm *wm = my_desk();
@@ -3012,12 +3235,17 @@ static int sys_desk_message(int argc, struct sysval *a, struct sysval *r)
 	struct wm *wm = my_desk();
 	if (!wm || !argc || !a[0].is_str)
 		return -2;
+	desk_lock(wm);
 	struct win *w = open_dialog(wm, argc > 1 && a[1].is_str ? a[1].s : "Message", a[0].s, 0, 3);
-	if (!w)
+	if (!w) {
+		desk_unlock(wm);
 		return -3;
+	}
 	render_dialog(w);
+	desk_unlock(wm);
 	while (!w->dlg->done)
 		task_idle();
+	desk_lock(wm);
 	if (!w->closed) {	/* still on screen: take it down */
 		w->dlg->purpose = 0;
 		win_destroy(wm, w);
@@ -3026,10 +3254,11 @@ static int sys_desk_message(int argc, struct sysval *a, struct sysval *r)
 		surf_free(&w->content);
 		kfree(w);
 	}
+	desk_unlock(wm);
 	return 0;
 }
 
-static int sys_desk_run(int argc, struct sysval *a, struct sysval *r)
+static int sys_desk_run_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)r;
 	struct wm *wm = my_desk();
@@ -3039,7 +3268,7 @@ static int sys_desk_run(int argc, struct sysval *a, struct sysval *r)
 	return 0;
 }
 
-static int sys_desk_size(int argc, struct sysval *a, struct sysval *r)
+static int sys_desk_size_u(int argc, struct sysval *a, struct sysval *r)
 {
 	(void)argc; (void)a;
 	struct wm *wm = my_desk();
@@ -3171,6 +3400,7 @@ static long desk_write(struct chardev *d, const void *buf, size_t n)
 	struct wm *wm = my_desk();
 	if (!wm)
 		return E_NOTSUP;	/* "Not supported on this drive": no desktop here */
+	desk_lock(wm);
 	char line[256];
 	size_t o = 0;
 	const char *p = buf;
@@ -3184,6 +3414,7 @@ static long desk_write(struct chardev *d, const void *buf, size_t n)
 			line[o++] = p[i];
 		}
 	}
+	desk_unlock(wm);
 	return (long)n;
 }
 
@@ -3196,6 +3427,7 @@ static long desk_read(struct chardev *d, void *buf, size_t n)
 	if (!wm)
 		len = snprintf(info, sizeof info, "no desktop\n");
 	else {
+		desk_lock(wm);
 		int nw = 0;
 		for (struct win *w = wm->wins; w; w = w->next)
 			nw++;
@@ -3211,6 +3443,7 @@ static long desk_read(struct chardev *d, void *buf, size_t n)
 			    w->id, w->x, w->y, w->w, w->h, w == wm->focus ? " focus" : "",
 			    w->minimized ? " minimized" : "", back, w->title);
 		}
+		desk_unlock(wm);
 	}
 	size_t c = MIN(n, (size_t)len);
 	memcpy(buf, info, c);
@@ -3242,8 +3475,12 @@ static long draw_write(struct chardev *d, const void *buf, size_t n)
 	if (!console_is_termwin(c))
 		return E_NOTSUP;
 	struct termwin *t = c->priv;
-	if (!t->win || t->closed)
+	if (!tw_lock(t))
 		return (long)n;
+	if (!t->win) {
+		desk_unlock(t->wm);
+		return (long)n;
+	}
 	struct surface *s = &t->win->content;
 	char cmd[256];
 	size_t o = 0;
@@ -3280,6 +3517,7 @@ static long draw_write(struct chardev *d, const void *buf, size_t n)
 #undef NUM
 		win_dirty(t->win, (struct rect){ 0, 0, s->w, s->h });
 	}
+	desk_unlock(t->wm);
 	return (long)n;
 }
 
@@ -3323,12 +3561,8 @@ static struct chardev draw_dev = { "DRAW$", NULL, draw_write, NULL, 0 };
 /* repaint every window of every desktop: the colours changed */
 void repaint_all(void)
 {
-	for (struct wm *wm = all_wms; wm; wm = wm->next_wm) {
-		for (struct win *w = wm->wins; w; w = w->next)
-			if (!w->closed && w->ops && w->ops->repaint)
-				w->ops->repaint(w);
-		wm_dirty_all(wm);
-	}
+	for (struct wm *wm = all_wms; wm; wm = wm->next_wm)
+		wm->want_repaint = 1;	/* each desktop does its own */
 }
 
 static void wm_settings(const char *key)
@@ -3337,16 +3571,20 @@ static void wm_settings(const char *key)
 		dclick_ms = (int)MAX(150, MIN(1500, setting_int("mouse.dclick")));
 	if (*key && !strcmp(key, "desktop.color"))
 		for (struct wm *wm = all_wms; wm; wm = wm->next_wm)
-			if (!wm->depth && !wm->follow_time)
-				wm_set_desktop_colour(wm, setting_rgb("desktop.color"));
+			if (!wm->depth && !wm->follow_time) {
+				wm->desktop = setting_rgb("desktop.color") & 0xFFFFFF;
+				wm->want_dirty = 1;
+			}
 	if (*key && !strcmp(key, "desktop.timeofday"))
 		for (struct wm *wm = all_wms; wm; wm = wm->next_wm) {
 			if (wm->depth)
 				continue;
 			wm->follow_time = setting_int("desktop.timeofday") != 0;
 			wm->next_time_check = 0;
-			if (!wm->follow_time)
-				wm_set_desktop_colour(wm, setting_rgb("desktop.color"));
+			if (!wm->follow_time) {
+				wm->desktop = setting_rgb("desktop.color") & 0xFFFFFF;
+				wm->want_dirty = 1;
+			}
 		}
 }
 

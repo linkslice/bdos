@@ -256,7 +256,7 @@ void ahci_init(void)
 		if (!d)
 			break;
 		pci_enable(d);
-		volatile uint8_t *abar = (volatile uint8_t *)pci_bar_mem(d, 5);
+		volatile uint8_t *abar = pci_map_bar(d, 5, 0x2000);
 		if (!abar)
 			continue;
 		volatile uint32_t *hba = (volatile uint32_t *)abar;

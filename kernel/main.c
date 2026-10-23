@@ -22,6 +22,7 @@ static void selftest(void)
 {
 	/* heap: every size class and a multi-page block */
 	void *p[12];
+	uint64_t before = heap_in_use();
 	for (int i = 0; i < 12; i++) {
 		p[i] = kmalloc((size_t)16 << i);
 		if (!p[i])
@@ -30,8 +31,8 @@ static void selftest(void)
 	}
 	for (int i = 0; i < 12; i++)
 		kfree(p[i]);
-	if (heap_in_use())
-		panic("selftest: heap leak (%lu bytes)", heap_in_use());
+	if (heap_in_use() != before)
+		panic("selftest: heap leak (%lu bytes)", heap_in_use() - before);
 
 	/* tasks: two contexts taking turns */
 	struct task *t = task_spawn("selftest", pong, NULL, NULL);
@@ -51,15 +52,24 @@ static void selftest(void)
 void kernel_late_init(void)
 {
 	sysapi_init();
+	extern void cpuinfo_init(void), proc_init(void);
+	cpuinfo_init();
+	proc_init();
 	storage_init();
 	extern void settings_init(void);
 	settings_init();
 	input_settings_init();
 	extern void desktop_init(void);
 	desktop_init();
-	extern void net_init(void), remote_init(void);
+	extern void audio_init(void), xhci_init(void);
+	xhci_init();
+	audio_init();
+	extern void net_init(void), remote_init(void), inet_init(void);
 	remote_init();
+	inet_init();
 	net_init();
+	extern void ntp_init(void);
+	ntp_init();
 }
 
 void kmain(struct bdos_bootinfo *bi)
@@ -77,19 +87,26 @@ void kmain(struct bdos_bootinfo *bi)
 	irq_enable();
 	ps2_init();
 	selftest();
+	time_calibrate();
+	int cores = arch_smp_init();
 
 	char total[32];
 	fmt_commas(total, sizeof total, pmm_total() / 1024);
 	kprintf("%s %s (%s) - %s\n", BDOS_NAME, BDOS_VERSION, ARCH_NAME, BDOS_LONGNAME);
-	kprintf("%s K memory, %ux%u display%s\n\n", total, bi->fb.width,
-	    bi->fb.height, ps2_mouse_present() ? ", mouse" : "");
+	if (bi->fb.base)
+		kprintf("%s K memory, %d core%s, %ux%u display%s\n\n", total, cores, cores == 1 ? "" : "s",
+		    bi->fb.width, bi->fb.height, ps2_mouse_present() ? ", mouse" : "");
+	else
+		kprintf("%s K memory, %d core%s, serial console\n\n", total, cores, cores == 1 ? "" : "s");
 
 	kernel_late_init();
 
-	struct task *sh = task_spawn("COMMAND", shell_task, NULL, screen_console());
+	/* no screen (a MIPS box on its serial port): the shell lives on COM1 */
+	struct console *home = bi->fb.base ? screen_console() : serial_console();
+	struct task *sh = task_spawn("COMMAND", shell_task, NULL, home);
 	for (;;) {
 		task_wait(sh);
 		/* EXIT from the top-level shell starts a fresh one, like DOS. */
-		sh = task_spawn("COMMAND", shell_task, NULL, screen_console());
+		sh = task_spawn("COMMAND", shell_task, NULL, home);
 	}
 }

@@ -17,6 +17,13 @@ static const struct setting_info known[] = {
 	{ "desktop.color", "2f6f73", "colour of the top-level desktop (rrggbb)" },
 	{ "desktop.theme", "bdos Classic", "theme from C:\\BDOS\\THEMES (Hot Dog Stand, Plan 9...)" },
 	{ "desktop.timeofday", "0", "1: the desktop colour follows the time of day" },
+	{ "net.cpu", "", "the machine CPU runs things on when you don't name one (\\\\HOST)" },
+	{ "dos.trace", "0", "1: when a DOS program crashes, list the last instructions it ran; 1 or 2: Ctrl+Alt+F10 shows the VGA state; 3: 1, and every DOS call logged on COM1" },
+	{ "dos.scale", "sharp", "DOS screens in a bigger window: sharp (whole pixels when it nearly fills), smooth (keep the shape, fill the space), stretch (fill it all)" },
+	{ "dos.speed", "486", "DOS programs' pace: xt, at, 386, 486, pentium, max (or instructions per ms)" },
+	{ "pm.autoarrange", "0", "1: Program Manager keeps each group's icons in name order" },
+	{ "pm.minonuse", "0", "1: Program Manager shrinks to an icon when it starts something" },
+	{ "pm.savesettings", "1", "1: Program Manager remembers where its groups and window were" },
 	{ "mouse.speed", "5", "pointer speed, 1 (slow) to 10 (fast)" },
 	{ "mouse.dclick", "450", "double-click time in milliseconds" },
 	{ "mouse.swap", "0", "1 swaps the left and right buttons" },
@@ -26,11 +33,15 @@ static const struct setting_info known[] = {
 	{ "net.ip", "dhcp", "dhcp, or a fixed address like 192.168.1.50" },
 	{ "net.mask", "255.255.255.0", "subnet mask (fixed address only)" },
 	{ "net.gateway", "", "default gateway (fixed address only)" },
-	{ "net.dns", "", "DNS server (fixed address only)" },
+	{ "net.dns", "", "DNS server (when set, used even with DHCP)" },
 	{ "net.udp", "1", "1 lets bterm and routed peers in over UDP" },
 	{ "net.port", "17979", "UDP port for bterm and BDNET over UDP" },
 	{ "net.password", "", "password bterm must give (empty: none)" },
+	{ "net.telnet", "0", "1 runs a telnet server on port 23 (asks for net.password if set)" },
 	{ "clock.seconds", "1", "1 to show seconds on the clock" },
+	{ "net.ntp", "", "time server to set the clock from (pool.ntp.org), empty for none" },
+	{ "clock.tz", "0", "hours from UTC for the clock NTP sets: -6, +1, +5:30" },
+	{ "clock.dst", "none", "daylight saving time: us, eu or none" },
 };
 
 static struct {
@@ -95,6 +106,27 @@ static void save(void)
 		o += (size_t)snprintf(buf + o, 8192 - o, "%s=%s\n", kv[i].key, kv[i].val);
 	vfs_spew(SETTINGS_PATH, buf, o);
 	kfree(buf);
+}
+
+/* the settings as they are, with some replaced, into another file (the installer's) */
+int settings_write_to(const char *path, const char *const *keys, const char *const *vals, int n)
+{
+	char *buf = kmalloc(8192);
+	if (!buf)
+		return -1;
+	size_t o = (size_t)snprintf(buf, 8192, "; bdos settings - edit with CONTROL or the Control Panel\n");
+	for (int i = 0; i < nkv && o < 7800; i++) {
+		int over = 0;
+		for (int k = 0; k < n; k++)
+			over |= !strcasecmp(keys[k], kv[i].key);
+		if (!over)
+			o += (size_t)snprintf(buf + o, 8192 - o, "%s=%s\n", kv[i].key, kv[i].val);
+	}
+	for (int k = 0; k < n && o < 8000; k++)
+		o += (size_t)snprintf(buf + o, 8192 - o, "%s=%s\n", keys[k], vals[k]);
+	int r = vfs_spew(path, buf, o);
+	kfree(buf);
+	return r;
 }
 
 static void notify(const char *key)

@@ -1,0 +1,47 @@
+Getting Started
+===============
+
+Welcome to bdos. This is the Help window: pick a topic on the left, and
+scroll the text with the mouse wheel, the arrow keys or Page Up/Down.
+Press F1 in Program Manager to come back here.
+
+The prompt
+----------
+bdos starts at C:\> (or straight into the desktop, if you asked for that).
+HELP lists the commands. A few to start with:
+
+  DIR, CD, COPY, DEL, TYPE, EDIT    the usual
+  WIN                               the desktop
+  CONTROL                           settings (CONTROL LIST shows them all)
+  BASIC, TCC                        write programs
+  FDISK, FORMAT, INSTALL            disks, and putting bdos on one
+  NTP                               set the clock from the internet
+
+The desktop
+-----------
+Program Manager holds your programs in groups. Double-click an icon to
+start it; File > Properties sets its command, working directory, whether
+it starts minimized, and how fast a DOS program in it runs. Anything in
+the Startup group starts with the desktop.
+
+  Alt+N        a new shell              Alt+W     the next window
+  Alt+Q        close the window         Alt+X leave the desktop
+  Alt+Space    the window menu          Ctrl+Esc the Task Manager
+  F1           this Help (in Program Manager)
+
+Drag a window's edge or corner to resize it - shells, DOS games and nested
+desktops included. The mouse wheel scrolls whatever is under the pointer.
+
+Shell windows
+-------------
+Shell windows keep the last 500 lines that scrolled away. Look back with
+the wheel or Shift+Page Up; typing brings you back. Drag to select text
+(double-click selects a word), then:
+
+  Ctrl+Insert or Ctrl+Shift+C    copy
+  Shift+Insert or Ctrl+Shift+V   paste (or the middle button)
+  right-click                    Copy, Paste, Select All, Clear Scrollback
+
+The clipboard is also the CLIP$ device: TYPE CLIP$, or DIR > CLIP$.
+
+See also: Desktop, Settings.

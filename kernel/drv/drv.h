@@ -20,6 +20,7 @@ void pci_write32(struct pci_dev *d, uint8_t off, uint32_t v);
 void pci_enable(struct pci_dev *d);
 uint64_t pci_bar_mem(struct pci_dev *d, int i);
 uint16_t pci_bar_io(struct pci_dev *d, int i);
+volatile void *pci_map_bar(struct pci_dev *d, int i, uint64_t size);	/* mapped for us */
 void pci_list(void);
 
 /* Block devices, in 512-byte sectors */
@@ -38,6 +39,10 @@ struct blkdev *blk_get(int i);
 int blk_count(void);
 
 void ahci_init(void);
+void nvme_init(void);
+void virtio_blk_init(void);
+void virtio_scsi_init(void);
+void ata_init(void);
 struct blkdev *ramdisk_create(const char *name, const void *image, uint64_t bytes);
 
 #endif

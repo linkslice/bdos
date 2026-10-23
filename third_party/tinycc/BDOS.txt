@@ -1,0 +1,15 @@
+This is the Tiny C Compiler (https://repo.or.cz/tinycc.git), version
+0.9.28rc, commit e23dabed154a8495f3ac1ff3cc9d04fa1c207893, cut down to
+what bdos needs to build tcc for x86-64.
+
+TCC is distributed under the GNU Lesser General Public License, version
+2.1 (see COPYING). The bdos changes are all marked "bdos:" and are:
+
+  tcc.h          drive-letter paths, ';' between paths (__bdos__)
+  x86_64-link.c  programs start at 0x8000000000, where bdos user space is
+  libtcc.c       static linking by default (bdos has no shared libraries)
+  tcc.c          the default output is NAME.EXE
+  tccpp.c        programs see __bdos__ (not __linux__ or __unix__)
+  config.h       new: the bdos configuration
+
+bdos's Makefile builds it with clang and bdos's C library (lib/).

@@ -4,7 +4,7 @@ the desktop in bterm's window (SDL offscreen), discovery and passwords.
 
 Usage: btermtest.py <bdos.img> <bterm binary> <outdir>
 """
-import os, pty, select, shutil, subprocess, sys, time
+import os, pty, re, select, shutil, subprocess, sys, time
 
 IMG, BTERM, OUTDIR = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3]
 sys.argv = [sys.argv[0], IMG, OUTDIR]
@@ -69,7 +69,7 @@ try:
 
         pump(3)
         assert b"Connected to" in out, out
-        run("ver", "bdos version 0.10")
+        run("ver", "bdos version 0.11")
         run("dir T:", "Mine.txt")
         run("type t:\\mine.txt", "this file lives on the host")         # any case
         run('type "T:\\sub dir\\deep.txt"', "deep down")
@@ -101,6 +101,34 @@ try:
         time.sleep(1)
         vm.cmd("ver", "bdos version")             # the machine's own screen is untouched
     check("bterm desktop window", desktop)
+
+    def desktop_resize():
+        # the bterm window made bigger: the desktop grows to fill it
+        snap = os.path.join(tmp, "desk2.ppm")
+        r = bterm("--resize", "1280x800", "--type-after", "2", "--quit-after", "9", "--snap", snap,
+                  f"127.0.0.1:{PORT}", env=SDL_ENV)
+        assert r.returncode == 0, r.stderr.decode()
+        img = Image.open(snap)
+        img.save(os.path.join(OUTDIR, "bterm-resized.png"))
+        assert img.size == (1280, 800), img.size
+        px = img.convert("RGB")
+        assert px.getpixel((1200, 760)) == (0x2F, 0x6F, 0x73), px.getpixel((1200, 760))
+        time.sleep(1)
+    check("bterm: a bigger window, a bigger desktop", desktop_resize)
+
+    def desktop_game():
+        # a DOS game in the bterm window: the keyboard arrives as make and
+        # break codes, so a key held for 1.5 s is held for 1.5 s
+        start = len(vm.log)
+        r = bterm("--type", "\\rcd \\dosapps\\rkeyhold\\r\\W\\Ha\\e", "--type-after", "3",
+                  "--quit-after", "14", f"127.0.0.1:{PORT}", env=SDL_ENV)
+        assert r.returncode == 0, r.stderr.decode()
+        out = vm.text(start)
+        m = re.search(r"1E=(\d+)", out)
+        assert m and 20 <= int(m.group(1)) <= 35, out[-600:]
+        time.sleep(1)
+        vm.cmd("ver", "bdos version")
+    check("bterm: a DOS game sees a held key", desktop_game)
 
     def list_and_password():
         r = bterm("-l", f"127.0.0.1:{PORT}")

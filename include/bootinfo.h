@@ -43,6 +43,9 @@ struct bdos_memrange {
 
 #define BDOS_MAX_MEMRANGES 256
 
+/* booted from the live CD (its boot volume has \\BDOS\\LIVE.TXT): C: is the RAM disk */
+#define BDOS_BOOT_LIVE 1
+
 struct bdos_bootinfo {
 	uint64_t magic;
 	struct bdos_framebuffer fb;
@@ -52,7 +55,7 @@ struct bdos_bootinfo {
 	uint64_t rootfs_base;	/* \BDOS\ROOTFS.IMG if present, else 0 */
 	uint64_t rootfs_size;
 	uint32_t nranges;
-	uint32_t _pad;
+	uint32_t flags;		/* BDOS_BOOT_* */
 	struct bdos_memrange ranges[BDOS_MAX_MEMRANGES];
 };
 

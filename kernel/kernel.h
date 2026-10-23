@@ -7,10 +7,11 @@
 #include <stdarg.h>
 #include "../include/bootinfo.h"
 #include "arch.h"
+#include "spinlock.h"
 
 #define BDOS_NAME	"bdos"
 #define BDOS_LONGNAME	"Bryan Disk Operating System"
-#define BDOS_VERSION	"0.10"
+#define BDOS_VERSION	"0.11"
 
 #define NELEM(a)	(sizeof(a) / sizeof((a)[0]))
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
@@ -29,6 +30,7 @@ void *memset(void *d, int c, size_t n);
 void *memcpy(void *d, const void *s, size_t n);
 void *memmove(void *d, const void *s, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
+void *memchr(const void *s, int c, size_t n);
 size_t strlen(const char *s);
 int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
@@ -71,6 +73,9 @@ uint64_t heap_in_use(void);
 /* ---- time.c ------------------------------------------------------------- */
 void timer_tick(void);			/* called from the timer IRQ */
 uint64_t uptime_ms(void);
+uint64_t uptime_us(void);		/* from the CPU's cycle counter */
+void delay_us(uint64_t us);		/* spins */
+void time_calibrate(void);
 void sleep_ms(uint64_t ms);		/* yields */
 
 /* ---- input.c ------------------------------------------------------------ */
@@ -79,7 +84,9 @@ struct mouse_event {
 	int buttons;	/* bit 0 left, 1 right, 2 middle */
 	int abs;	/* 1: ax, ay are an absolute position, 0..65535 each way */
 	int ax, ay;
+	int wheel;	/* clicks of the wheel: + away from you (scroll up), - towards */
 };
+void input_wheel(int clicks);		/* from drivers: + up, - down */
 void input_key(int key);		/* from drivers, any context */
 void input_mouse_abs(int x, int y, int buttons);	/* tablets, vmmouse: 0..65535 */
 int input_mouse_is_abs(void);
@@ -90,6 +97,8 @@ void input_settings_init(void);
 void input_mouse(int dx, int dy, int buttons);
 int input_getkey(void);			/* -1 if none */
 int input_getmouse(struct mouse_event *ev);	/* 0 if none */
+void input_raw(uint8_t sc);		/* a set-1 scancode byte, as the keyboard sent it */
+int input_getraw(void);			/* -1 if none */
 
 /* ---- consoles ------------------------------------------------------------
  * A console is where a task's text goes and where its keys come from:
@@ -106,6 +115,7 @@ struct console {
 	void (*attr)(struct console *, int fg, int bg);		/* optional, 0-15 */
 	void *priv;
 	int refs;
+	void (*rawchar)(struct console *, int ch);	/* optional: a glyph, controls and all */
 };
 
 void screen_init(const struct bdos_framebuffer *fb);
@@ -119,6 +129,7 @@ void console_panic_mode(void);		/* force output to the screen */
 struct console *serial_console(void);
 
 void con_write(const char *s);		/* to the current task's console */
+void con_writen(const char *s, size_t n);
 void con_putc(char c);
 int con_getkey(void);			/* blocks */
 int con_pollkey(void);
@@ -127,6 +138,7 @@ void con_cursor(int on);
 void con_size(int *cols, int *rows);
 void con_gotoxy(int x, int y);
 void con_attr(int fg, int bg);
+void con_rawchar(int ch);		/* CP437 glyph at the cursor, even 0x01-0x1F */
 
 /* ---- tasks -------------------------------------------------------------- */
 #define TASK_NAME_MAX 24
@@ -134,11 +146,15 @@ void con_attr(int fg, int bg);
 enum { TASK_READY, TASK_DEAD };
 
 struct task {
+	struct arch_context ctx;	/* first: it wants 16-byte alignment */
 	int id;
 	char name[TASK_NAME_MAX];
-	int state;
-	int idle;			/* polled and found nothing to do */
-	struct arch_context ctx;
+	volatile int state;
+	volatile int cpu;		/* the core running it, or -1 */
+	int bkl;			/* holds on the big kernel lock (0: running free) */
+	uint64_t poll_epoch;		/* polled and found nothing at this epoch */
+	uint64_t ticks;			/* CPU time used, in ms */
+	int last_cpu;
 	void *stack;
 	size_t stack_pages;
 	struct console *con;		/* where this task's text goes */
@@ -146,23 +162,69 @@ struct task {
 	void (*entry)(void *);
 	void *arg;
 	int exit_code;
-	int waiters;
+	volatile int waiters;
 	struct task *next;
 	void *user;			/* per-subsystem data (shell state) */
 	void *desk;			/* the desktop this task lives on, if any */
 	void *tdrive;			/* a session's T: drive (struct vfs_drive) */
+	void *proc;			/* the native program this is a thread of, if any */
+	uint64_t fs_base;		/* its thread-local storage */
+	char dos_speed[12];		/* DOS programs here run at this pace ("": as usual) */
 };
 
+/* One per core. GS points at it; self must stay first. */
+struct cpu {
+	struct cpu *self;
+	uint64_t kstack;		/* +8: the current task's kernel stack top (SYSCALL uses it) */
+	uint64_t scratch;		/* +16: the user stack pointer, while SYSCALL switches */
+	int id;
+	uint32_t hwid;			/* local APIC ID */
+	struct task *current, *idle, *prev;
+	volatile int online, parked;
+	volatile int need_resched;
+	uint64_t slice;			/* ticks the current task has run */
+	volatile uint64_t busy_ticks, idle_ticks;	/* for Pulse */
+	uint64_t last_busy, last_idle;
+	volatile int load;		/* percent busy over the last quarter second */
+	void *arch;			/* GDT, TSS: the arch layer's business */
+};
+extern struct cpu cpus[MAX_CPUS];
+extern int ncpus;
+
 void task_init(void);
+void sched_start_cpu(void);		/* an extra core enters the scheduler */
+void sched_tick(void);			/* per-core timer tick */
+void sched_preempt_check(void);		/* end of an interrupt: switch if due */
 struct task *task_spawn(const char *name, void (*fn)(void *), void *arg,
     struct console *con);
 struct task *task_current(void);
 void task_yield(void);
-void task_idle(void);			/* yield; sleep the CPU if everyone idles */
+void task_idle(void);			/* nothing to do until something happens */
+void sched_kick(void);			/* something happened: idle pollers, look again */
 _Noreturn void task_exit(void);
 int task_wait(struct task *t);		/* until t exits, returns its code */
 int task_alive(struct task *t);
 void task_list(void);
+struct task_info {
+	int id, cpu;
+	uint64_t ms;
+	char name[TASK_NAME_MAX], con[12], cwd[40];
+};
+int task_snapshot(struct task_info *out, int max);	/* the live tasks, how many */
+int cpu_park(int cpu, int parked);	/* Pulse's buttons; 0 or -1 */
+void cpu_sample(void);			/* every 250 ms: each core's load */
+
+/*
+ * The big kernel lock. Tasks hold it by default, so kernel code stays as
+ * single-threaded as it always was. Code that computes on its own memory
+ * (the interpreters, the DOS emulator, native programs) lets go of it, runs
+ * in parallel on any core, and takes it back to call into the kernel.
+ */
+int bkl_release_all(void);		/* returns the depth to give back */
+void bkl_reacquire(int depth);
+void bkl_enter(void);			/* gates: take it (nesting is fine) */
+void bkl_leave(void);
+int bkl_held(void);
 
 /* ---- shell.c ------------------------------------------------------------ */
 #define KEY_EOF 0x1A			/* Ctrl-Z ends console input, as in DOS */

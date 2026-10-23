@@ -127,8 +127,15 @@ int fop_copy(const char *src, const char *dst_dir, int flags)
 	char dst[VFS_PATH_MAX];
 	if (vfs_join(dst_dir, vfs_basename(src), dst, sizeof dst))
 		return E_NAMETOOLONG;
-	if (!strcasecmp(src, dst))
-		return (flags & FOP_MOVE) ? 0 : E_EXIST;	/* onto itself */
+	if (!strcasecmp(src, dst)) {
+		if (flags & FOP_MOVE)
+			return 0;			/* already there */
+		if (!(flags & FOP_DUP))
+			return E_EXIST;			/* onto itself */
+		/* pasted where it came from: a second one, "NAME (2).TXT" */
+		int r = fop_unique(dst_dir, vfs_basename(src), dst, sizeof dst);
+		return r ? r : copy_tree(src, dst);
+	}
 	if (inside(src, dst_dir))
 		return E_INVAL;				/* a folder into itself */
 	struct vstat st;

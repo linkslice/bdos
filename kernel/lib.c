@@ -396,6 +396,7 @@ _Noreturn void panic(const char *fmt, ...)
 	vsnprintf(buf, sizeof buf, fmt, ap);
 	va_end(ap);
 	irq_disable();
+	arch_halt_others();
 	console_panic_mode();
 	con_write("\n*** bdos panic: ");
 	con_write(buf);
@@ -410,4 +411,13 @@ _Noreturn void panic(const char *fmt, ...)
 	}
 	con_write("\n*** System halted.\n");
 	arch_halt();
+}
+
+void *memchr(const void *s, int c, size_t n)
+{
+	const unsigned char *p = s;
+	for (size_t i = 0; i < n; i++)
+		if (p[i] == (unsigned char)c)
+			return (void *)(p + i);
+	return NULL;
 }

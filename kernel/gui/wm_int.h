@@ -18,7 +18,7 @@
 #define CLIENT_Y	(BORDER + TITLE_H)
 #define FRAME_W(cw)	((cw) + 2 * BORDER)
 #define FRAME_H(ch)	((ch) + 2 * BORDER + TITLE_H)
-#define GRIP		5	/* how near the edge a press starts a resize */
+#define GRIP		8	/* how near the edge a press starts a resize */
 #define SB_W		16	/* scroll bar width */
 #define ICON_SLOT_W	112	/* minimized windows along the bottom */
 #define ICON_SLOT_H	64
@@ -59,6 +59,15 @@ struct termwin {
 	int hold;		/* keep the window after the command ends */
 	int child;		/* a nested desktop or remote view owns the pixels */
 	struct evq child_ev;
+	/* scrollback: lines gone off the top, oldest first in a ring */
+	uint16_t **sb;
+	uint16_t *sblen;
+	int sbhead, sbcount;
+	int view;		/* how many lines back we're looking (0: live) */
+	/* a selection, in lines counted from the oldest kept (history, then the screen) */
+	int sel, selecting, sa_line, sa_col, se_line, se_col;
+	char *paste;		/* being typed in, from the clipboard */
+	size_t paste_pos;
 	struct termwin *next_zombie;
 };
 
@@ -86,6 +95,10 @@ struct winops {
 	/* drag and drop: paths are '\n'-separated absolute paths */
 	int (*drop)(struct win *w, int x, int y, const char *paths, int copy);
 	const char *icon;				/* when minimized */
+	/* or draw the 32x32 icon yourself (live icons, like Pulse's) */
+	void (*draw_icon)(struct win *w, struct surface *s, int x, int y);
+	/* the mouse wheel: clicks + up, - down; x, y in the client area */
+	void (*wheel)(struct win *w, int x, int y, int clicks);
 };
 
 struct win {
@@ -155,6 +168,7 @@ struct wm {
 	struct win *wins;
 	struct win *focus;
 	int mx, my, buttons, mods;
+	int rawmods, raw_e0;	/* Shift/Ctrl/Alt as the raw make/break codes have them (bterm) */
 	struct win *drag;
 	int drag_dx, drag_dy;
 	struct rect dirty;
@@ -176,6 +190,8 @@ struct wm {
 	int ptr;		/* pointer shape: 0 arrow, else resize edges */
 	struct win *grab;	/* the window that got the button press */
 	struct popup *popup;
+	struct win *kbmove;	/* Move/Size from the keyboard: the window, and 1 move or 2 size */
+	int kbmode;
 	struct dnd dnd;
 	struct wm *next_wm;
 };
@@ -200,6 +216,14 @@ void toggle_maximize(struct wm *wm, struct win *w);
 void close_request(struct wm *wm, struct win *w);
 struct win *open_term(struct wm *wm, const char *title, const char *cmd, int cols, int rows, int x, int y);
 void launch_cmd(struct wm *wm, const char *label, const char *cmd);
+struct lnk {
+	char cmd[200], dir[200], speed[12];
+	int minimized;
+};
+int lnk_read(const char *path, struct lnk *l);
+int lnk_write(const char *path, const struct lnk *l);
+void launch_item(struct wm *wm, const char *label, const char *cmd, const char *dir, int minimized,
+    const char *speed);
 void launch_path(struct wm *wm, const char *path);	/* open a file the obvious way */
 struct win *open_dialog(struct wm *wm, const char *title, const char *msg, int input, int purpose);
 void render_dialog(struct win *w);
@@ -212,8 +236,12 @@ void control_menu(struct wm *wm, struct win *w, int x, int y);
 const char *icon_for_file(const char *name, int is_dir);
 void term_type(struct win *w, const char *text);
 void repaint_all(void);
+void win_icon_dirty(struct win *w);
 void wm_dnd_start(struct wm *wm, struct win *src, const char *paths, const char *icon);
 int console_is_termwin(struct console *c);
+/* the text clipboard (CLIP$ too) */
+void clip_text_set(const char *text, size_t n);
+const char *clip_text_get(void);
 
 /* ---- ui.c: popup menus, scroll bars, small dialogs ---- */
 void popup_open(struct wm *wm, int x, int y, const struct menu_item *items, int n,
@@ -223,6 +251,7 @@ void popup_close(struct wm *wm);
 void popup_draw(struct wm *wm, struct surface *s);
 int popup_mouse(struct wm *wm, int type, int x, int y);	/* 1 if it took the event */
 int popup_key(struct wm *wm, int k);
+void popup_select_first(struct wm *wm);	/* opened from the keyboard: highlight the first item */
 
 /* menu bars drawn inside a window: titles left to right */
 struct menubar {
@@ -266,6 +295,7 @@ void files_refresh_all(void);		/* something changed on disk */
 /* ---- fileops.c: copying, moving and deleting trees ---- */
 #define FOP_MOVE	1
 #define FOP_REPLACE	2	/* overwrite what's there */
+#define FOP_DUP		4	/* a copy onto itself makes "NAME (2)" */
 int fop_copy(const char *src, const char *dst_dir, int flags);	/* 0 or E_ */
 int fop_exists_in(const char *src, const char *dst_dir);	/* would it collide? */
 int fop_delete(const char *path);

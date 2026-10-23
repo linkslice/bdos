@@ -15,7 +15,7 @@
 #include "net.h"
 
 enum {
-	M_KEY = 1, M_OUT, M_CTRL, M_EV, M_PIX, M_FREQ, M_FREP, M_BYE,
+	M_KEY = 1, M_OUT, M_CTRL, M_EV, M_PIX, M_FREQ, M_FREP, M_BYE, M_PTR,
 };
 
 enum { C_CLEAR = 1, C_GOTO, C_ATTR, C_CURSOR };
@@ -24,6 +24,7 @@ enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAM
 	F_SETATTR, F_INFO };
 
 #define HELLO_SHARE	1
+#define HELLO_CMD	2	/* run this one command and hang up (CPU \\HOST cmd) */
 #define HELLO_POINTER	2
 
 struct hello {
@@ -31,6 +32,7 @@ struct hello {
 	uint8_t flags;
 	char host[32];
 	char share[128];	/* the directory offered as T: */
+	char cmd[160];		/* HELLO_CMD: the command line */
 } __attribute__((packed));
 
 static size_t strnlen_b(const char *s, size_t max)
@@ -562,9 +564,18 @@ static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		if (tdr)
 			t->tdrive = &tdr->drive;
 	}
-	kprintf("Connected to \\\\%s (%s %s). T: is %s on \\\\%s. EXIT to disconnect.\n\n",
-	    net_hostname(), BDOS_NAME, BDOS_VERSION, h.share[0] ? h.share : "nothing", h.host);
-	shell_task(NULL);
+	if (h.flags & HELLO_CMD) {
+		/* a CPU server's job: run it from the caller's own directory, T: */
+		h.cmd[sizeof h.cmd - 1] = 0;
+		if (tdr)
+			strcpy(t->cwd, "T:\\");
+		shell_task(kstrdup(h.cmd));
+	} else {
+		kprintf("Connected to \\\\%s (%s %s, %d core%s). T: is %s on \\\\%s. EXIT to disconnect.\n\n",
+		    net_hostname(), BDOS_NAME, BDOS_VERSION, ncpus, ncpus == 1 ? "" : "s",
+		    h.share[0] ? h.share : "nothing", h.host);
+		shell_task(NULL);
+	}
 	conn_send(c, M_BYE, NULL, 0);
 	t->con = NULL;
 	t->tdrive = NULL;
@@ -641,9 +652,29 @@ static int rd_event(struct display *d, struct event *e)
 		memcpy(v, m->data, sizeof v);
 		*e = (struct event){ v[0], v[1], v[2], v[3], v[4] };
 		ok = 1;
+		if (e->type == EV_RESIZE) {
+			/* bterm's window changed size: so does the desktop */
+			int w = MAX(320, MIN(e->x, 1600)), h = MAX(200, MIN(e->y, 1200));
+			struct surface ns;
+			if ((w != rd->surf.w || h != rd->surf.h) && !surf_init(&ns, w, h)) {
+				surf_free(&rd->surf);
+				rd->surf = ns;
+			} else {
+				ok = 0;
+			}
+		}
 	}
 	kfree(m);
 	return ok;
+}
+
+/* the pointer's shape, for a bterm that draws its own */
+static void rd_pointer(struct display *d, int shape)
+{
+	struct rdisp *rd = (struct rdisp *)d;
+	int32_t v = shape;
+	if (conn_alive(rd->c))
+		conn_send(rd->c, M_PTR, &v, sizeof v);
 }
 
 static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
@@ -664,6 +695,7 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	rd->d.next_event = rd_event;
 	rd->d.alive = 1;
 	rd->d.draws_pointer = (h.flags & HELLO_POINTER) != 0;
+	rd->d.pointer = rd_pointer;
 	rd->d.name = "network";
 
 	struct task *t = task_current();
@@ -729,8 +761,9 @@ static const char *strip_slashes(const char *host)
 	return host;
 }
 
-/* CTTY \\HOST: be a terminal for a shell over there. */
-int remote_tty(const char *host)
+/* CTTY \\HOST: be a terminal for a shell over there. With a command, CPU
+ * \\HOST runs just that over there and comes back. */
+int remote_run(const char *host, const char *cmd)
 {
 	host = strip_slashes(host);
 	int cols, rows, err = 0;
@@ -738,10 +771,13 @@ int remote_tty(const char *host)
 	if (rows > 200)
 		rows = 25;
 	struct hello h;
-	make_hello(&h, cols, rows, 0);
+	make_hello(&h, cols, rows, cmd ? HELLO_CMD : 0);
+	if (cmd)
+		strncpy0(h.cmd, cmd, sizeof h.cmd);
 	char share[VFS_PATH_MAX];
 	strncpy0(share, task_current()->cwd, sizeof share);
-	kprintf("Connecting to \\\\%s...\n", host);
+	if (!cmd)
+		kprintf("Connecting to \\\\%s...\n", host);
 	struct conn *c = conn_connect(host, SVC_TTY, &h, sizeof h, &err);
 	if (!c) {
 		kprintf("Can't reach \\\\%s: %s\n", host, err == E_NOENT ? "no such machine" :
@@ -795,8 +831,14 @@ int remote_tty(const char *host)
 	conn_close(c);
 	con_attr(7, 0);
 	con_cursor(0);
-	kprintf("\nConnection to \\\\%s closed.\n", host);
+	if (!cmd)
+		kprintf("\nConnection to \\\\%s closed.\n", host);
 	return 0;
+}
+
+int remote_tty(const char *host)
+{
+	return remote_run(host, NULL);
 }
 
 /* WIN \\HOST: show that machine's desktop here. */

@@ -13,6 +13,10 @@
 #include "../vfs.h"
 #include "../sysapi.h"
 #include "fmath.h"
+#include "../gate.h"
+
+static int basic_run_file_unlocked(const char *path, int argc, char **argv);
+static int basic_immediate_unlocked(void);
 
 #define MAX_LINE	256
 #define STACK_MAX	256
@@ -2029,7 +2033,7 @@ static void basic_free(struct basic *b)
 	kfree(b);
 }
 
-int basic_run_file(const char *path, int argc, char **argv)
+static int basic_run_file_unlocked(const char *path, int argc, char **argv)
 {
 	struct basic *b = basic_new();
 	if (!b)
@@ -2152,7 +2156,7 @@ static int filename_arg(char *p, char *out, size_t n)
 	return o > 0;
 }
 
-int basic_immediate(void)
+static int basic_immediate_unlocked(void)
 {
 	struct basic *b = basic_new();
 	if (!b)
@@ -2233,4 +2237,23 @@ int basic_immediate(void)
 	}
 	basic_free(b);
 	return 0;
+}
+
+/* The interpreter runs without the big kernel lock: on any core, in
+ * parallel with everything else. Kernel calls go through gate.h. */
+
+int basic_run_file(const char *path, int argc, char **argv)
+{
+	int held = bkl_release_all();
+	int r = basic_run_file_unlocked(path, argc, argv);
+	bkl_reacquire(held);
+	return r;
+}
+
+int basic_immediate(void)
+{
+	int held = bkl_release_all();
+	int r = basic_immediate_unlocked();
+	bkl_reacquire(held);
+	return r;
 }

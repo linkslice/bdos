@@ -177,16 +177,29 @@ static void scr_write(struct console *c, const char *s, size_t n)
 }
 
 /* Serial input with CR/LF and ANSI arrow translation. */
-static int esc_state, last_cr;
+static int esc_state, last_cr, held;
+static uint64_t esc_at;
 
 static int serial_key(void)
 {
-	int ch = serial_getc();
-	if (ch < 0)
+	int ch = held ? held : serial_getc();
+	held = 0;
+	if (ch < 0) {
+		/* Escape on its own: if nothing follows quickly, it was the key */
+		if (esc_state == 1 && uptime_ms() - esc_at > 40) {
+			esc_state = 0;
+			return 27;
+		}
 		return -1;
+	}
 	if (esc_state == 1) {
-		esc_state = (ch == '[') ? 2 : 0;
-		return esc_state ? -1 : 27;
+		if (ch == '[') {
+			esc_state = 2;
+			return -1;
+		}
+		esc_state = 0;
+		held = ch;		/* Escape, then this */
+		return 27;
 	}
 	if (esc_state == 2) {
 		esc_state = 0;
@@ -202,6 +215,7 @@ static int serial_key(void)
 	}
 	if (ch == 27) {
 		esc_state = 1;
+		esc_at = uptime_ms();
 		return -1;
 	}
 	if (ch == '\n' && last_cr) {
@@ -248,6 +262,9 @@ static void scr_gotoxy(struct console *c, int x, int y)
 	(void)c;
 	if (mirror && y != cy)
 		serial_putc('\n');	/* keep the COM1 transcript line by line */
+	else if (mirror && x > cx)
+		for (int i = cx; i < x && i < cols; i++)
+			serial_putc(' ');	/* and the gaps in a line as gaps */
 	if (cursor_on)
 		draw_cursor(0);
 	cx = MAX(0, MIN(x, cols - 1));
@@ -262,7 +279,24 @@ static void scr_attr(struct console *c, int fg, int bg)
 	cur_attr = ((bg & 0xF) << 4) | (fg & 0xF);
 }
 
+static void scr_rawchar(struct console *c, int ch)
+{
+	(void)c;
+	if (!fb || cx >= cols)
+		return;
+	if (cursor_on)
+		draw_cursor(0);
+	grid[cy][cx] = (uint16_t)(cur_attr << 8 | (uint8_t)ch);
+	draw_cell(cx, cy);
+	cx++;
+	if (mirror)
+		serial_putc(ch >= 0x20 && ch < 0x7F ? (char)ch : ' ');
+	if (cursor_on)
+		draw_cursor(1);
+}
+
 static struct console screen = {
+	.rawchar = scr_rawchar,
 	.name = "SCREEN",
 	.write = scr_write,
 	.getkey = scr_getkey,
@@ -275,7 +309,7 @@ static struct console screen = {
 
 void screen_init(const struct bdos_framebuffer *f)
 {
-	fb = (volatile uint32_t *)f->base;
+	fb = f->base ? (volatile uint32_t *)P2V(f->base) : NULL;
 	fb_w = f->width;
 	fb_h = f->height;
 	fb_pitch = f->pitch;
@@ -379,10 +413,27 @@ void con_write(const char *s)
 	c->write(c, s, strlen(s));
 }
 
+void con_writen(const char *s, size_t n)
+{
+	struct console *c = cur();
+	c->write(c, s, n);
+}
+
 void con_putc(char ch)
 {
 	struct console *c = cur();
 	c->write(c, &ch, 1);
+}
+
+void con_rawchar(int ch)
+{
+	struct console *c = cur();
+	if (c->rawchar) {
+		c->rawchar(c, ch);
+	} else {
+		char x = ch >= 0x20 && ch != 0x7F ? (char)ch : ' ';
+		c->write(c, &x, 1);
+	}
 }
 
 int con_pollkey(void)

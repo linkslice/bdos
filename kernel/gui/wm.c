@@ -213,6 +213,7 @@ void win_destroy(struct wm *wm, struct win *w)
 	kfree(w);
 }
 
+static void tw_free_history(struct termwin *t);
 static void reap_zombies(void)
 {
 	struct termwin **pp = &zombies;
@@ -221,6 +222,8 @@ static void reap_zombies(void)
 		if (!t->task || !task_alive(t->task)) {
 			*pp = t->next_zombie;
 			kfree(t->grid);
+			tw_free_history(t);
+			kfree(t->paste);
 			kfree(t);
 		} else {
 			pp = &t->next_zombie;
@@ -239,6 +242,12 @@ static struct rect icon_rect(struct wm *wm, struct win *w)
 			i++;
 	return (struct rect){ 8 + (i % per_row) * ICON_SLOT_W, sh - ICON_SLOT_H - (i / per_row) * ICON_SLOT_H,
 	    ICON_SLOT_W, ICON_SLOT_H };
+}
+
+void win_icon_dirty(struct win *w)
+{
+	if (w->minimized)
+		wm_dirty(w->wm, icon_rect(w->wm, w));
 }
 
 static struct win *icon_at(struct wm *wm, int x, int y)
@@ -295,23 +304,95 @@ static int title_buttons(struct win *w, int *close_x, int *max_x, int *min_x)
 
 /* ---- the terminal console ------------------------------------------------------ */
 
+#define SB_LINES 500
+
+/* line L: history first (0 is the oldest kept), then the screen's rows */
+static const uint16_t *tw_line(struct termwin *t, int L, int *len)
+{
+	if (L < 0) {
+		*len = 0;
+		return NULL;
+	}
+	if (L < t->sbcount) {
+		int i = (t->sbhead + L) % SB_LINES;
+		*len = t->sblen[i];
+		return t->sb[i];
+	}
+	L -= t->sbcount;
+	if (L >= t->rows) {
+		*len = 0;
+		return NULL;
+	}
+	*len = t->cols;
+	return t->grid + L * t->cols;
+}
+
+static int tw_selected(struct termwin *t, int L, int c)
+{
+	if (!t->sel)
+		return 0;
+	int al = t->sa_line, ac = t->sa_col, bl = t->se_line, bc = t->se_col;
+	if (bl < al || (bl == al && bc < ac)) {
+		int x = al; al = bl; bl = x;
+		x = ac; ac = bc; bc = x;
+	}
+	if (L < al || L > bl)
+		return 0;
+	if (L == al && c < ac)
+		return 0;
+	if (L == bl && c > bc)
+		return 0;
+	return 1;
+}
+
+/* how far back we are, top right, while looking at history */
+static void tw_overlay(struct termwin *t)
+{
+	if (t->child || t->closed || !t->view)
+		return;
+	char msg[40];
+	snprintf(msg, sizeof msg, " %d of %d lines back ", t->view, t->sbcount);
+	int w = (int)strlen(msg) * FONT_W, x = t->win->content.w - w - 2;
+	text_bg(&t->win->content, x, 0, msg, P(0), P(0xFFFF55));
+	win_dirty(t->win, (struct rect){ x, 0, w, FONT_H });
+}
+
+/* draw what's at column c of the window's text row sr */
+static void tw_draw(struct termwin *t, int c, int sr)
+{
+	if (t->child || t->closed || c >= t->cols || sr >= t->rows)
+		return;
+	int L = t->sbcount - t->view + sr, len;
+	const uint16_t *ln = tw_line(t, L, &len);
+	uint16_t cell = ln && c < len ? ln[c] : 0x0720;
+	int fgi = (cell >> 8) & 0xF, bgi = (cell >> 12) & 0xF;
+	if (tw_selected(t, L, c)) {
+		int x = fgi; fgi = bgi; bgi = x;
+		if (fgi == bgi)
+			fgi = 0, bgi = 7;
+	}
+	uint32_t fg = P(cga_palette[fgi]), bg = P(cga_palette[bgi]);
+	glyph(&t->win->content, c * FONT_W, sr * FONT_H, (unsigned char)(cell & 0xFF), fg, bg, 1);
+	if (!t->view && t->cursor_on && c == t->cx && sr == t->cy)
+		fill(&t->win->content, c * FONT_W, sr * FONT_H + 14, FONT_W, 2, fg);
+	win_dirty(t->win, (struct rect){ c * FONT_W, sr * FONT_H, FONT_W, FONT_H });
+}
+
+/* the screen's row r changed: draw it where it shows, if it does */
 static void tw_cell(struct termwin *t, int c, int r)
 {
-	if (t->child || t->closed)
-		return;
-	uint16_t cell = t->grid[r * t->cols + c];
-	uint32_t fg = P(cga_palette[(cell >> 8) & 0xF]), bg = P(cga_palette[(cell >> 12) & 0xF]);
-	glyph(&t->win->content, c * FONT_W, r * FONT_H, (unsigned char)(cell & 0xFF), fg, bg, 1);
-	if (t->cursor_on && c == t->cx && r == t->cy)
-		fill(&t->win->content, c * FONT_W, r * FONT_H + 14, FONT_W, 2, fg);
-	win_dirty(t->win, (struct rect){ c * FONT_W, r * FONT_H, FONT_W, FONT_H });
+	if (r + t->view < t->rows)
+		tw_draw(t, c, r + t->view);
 }
 
 static void tw_redraw(struct termwin *t)
 {
+	if (t->child || t->closed)
+		return;
 	for (int r = 0; r < t->rows; r++)
 		for (int c = 0; c < t->cols; c++)
-			tw_cell(t, c, r);
+			tw_draw(t, c, r);
+	tw_overlay(t);
 }
 
 static void tw_cursor_cell(struct termwin *t)
@@ -320,13 +401,83 @@ static void tw_cursor_cell(struct termwin *t)
 		tw_cell(t, t->cx, t->cy);
 }
 
+/* a line goes off the top of the screen: keep it */
+static void tw_push_history(struct termwin *t, const uint16_t *row, int cols)
+{
+	if (!t->sb) {
+		t->sb = kzalloc(sizeof(uint16_t *) * SB_LINES);
+		t->sblen = kzalloc(sizeof(uint16_t) * SB_LINES);
+		if (!t->sb || !t->sblen) {
+			kfree(t->sb);
+			kfree(t->sblen);
+			t->sb = NULL;
+			t->sblen = NULL;
+			return;
+		}
+	}
+	int len = cols;
+	while (len > 0 && (row[len - 1] & 0xFF) == ' ' && (row[len - 1] & 0xF000) == 0)
+		len--;
+	uint16_t *copy = len ? kmalloc(sizeof(uint16_t) * (size_t)len) : NULL;
+	if (len && !copy)
+		len = 0;
+	if (len)
+		memcpy(copy, row, sizeof(uint16_t) * (size_t)len);
+	int i;
+	if (t->sbcount < SB_LINES) {
+		i = (t->sbhead + t->sbcount) % SB_LINES;
+		t->sbcount++;
+	} else {			/* full: the oldest goes */
+		i = t->sbhead;
+		kfree(t->sb[i]);
+		t->sbhead = (t->sbhead + 1) % SB_LINES;
+		if (t->sel || t->selecting) {
+			t->sa_line--;
+			t->se_line--;
+			if (t->sa_line < 0 || t->se_line < 0)
+				t->sel = t->selecting = 0;
+		}
+	}
+	t->sb[i] = copy;
+	t->sblen[i] = (uint16_t)len;
+}
+
+static void tw_free_history(struct termwin *t)
+{
+	if (t->sb)
+		for (int i = 0; i < SB_LINES; i++)
+			kfree(t->sb[i]);
+	kfree(t->sb);
+	kfree(t->sblen);
+	t->sb = NULL;
+	t->sblen = NULL;
+	t->sbcount = t->sbhead = t->view = 0;
+	t->sel = t->selecting = 0;
+}
+
 static void tw_scroll(struct termwin *t)
 {
+	if (!t->child)
+		tw_push_history(t, t->grid, t->cols);
 	memmove(t->grid, t->grid + t->cols, sizeof(uint16_t) * (size_t)(t->cols * (t->rows - 1)));
 	for (int c = 0; c < t->cols; c++)
 		t->grid[(t->rows - 1) * t->cols + c] = (uint16_t)(t->attr << 8 | ' ');
 	if (t->child || t->closed)
 		return;
+	if (t->view) {
+		/* looking back: what's on the screen stays put */
+		if (t->view < t->sbcount) {
+			t->view++;
+			tw_overlay(t);
+		} else {
+			tw_redraw(t);
+		}
+		return;
+	}
+	if (t->sel) {
+		tw_redraw(t);	/* the selection moves with its text */
+		return;
+	}
 	/* move the pixels up one text row */
 	struct surface *s = &t->win->content;
 	for (int y = 0; y < s->h - FONT_H; y++)
@@ -338,6 +489,16 @@ static void tw_scroll(struct termwin *t)
 			tw_cell(t, c, t->rows - 2);	/* the old bottom row: no stale cursor */
 	}
 	win_dirty(t->win, (struct rect){ 0, 0, s->w, s->h });
+}
+
+/* scroll the view back (+) or forward (-) through the history */
+static void tw_view(struct termwin *t, int delta)
+{
+	int v = MAX(0, MIN(t->view + delta, t->sbcount));
+	if (v == t->view)
+		return;
+	t->view = v;
+	tw_redraw(t);
 }
 
 static void tw_putc(struct termwin *t, char ch)
@@ -384,6 +545,20 @@ static void tw_putc(struct termwin *t, char ch)
 	tw_cursor_cell(t);
 }
 
+static void tw_rawchar(struct console *c, int ch)
+{
+	struct termwin *t = c->priv;
+	if (t->cx >= t->cols || t->cy >= t->rows)
+		return;
+	int ox = t->cx, oy = t->cy;
+	t->grid[t->cy * t->cols + t->cx] = (uint16_t)(t->attr << 8 | (uint8_t)ch);
+	t->cx++;
+	if (mirror_terms)
+		serial_putc(ch >= 0x20 && ch < 0x7F ? (char)ch : ' ');
+	tw_cell(t, ox, oy);
+	tw_cursor_cell(t);
+}
+
 static void tw_write(struct console *c, const char *s, size_t n)
 {
 	struct termwin *t = c->priv;
@@ -399,6 +574,17 @@ static int tw_getkey(struct console *c)
 	struct termwin *t = c->priv;
 	if (t->closed)
 		return KEY_EOF;
+	if (t->paste) {
+		while (t->paste[t->paste_pos] == '\r')
+			t->paste_pos++;
+		int ch = (unsigned char)t->paste[t->paste_pos];
+		if (ch) {
+			t->paste_pos++;
+			return ch == '\t' ? ' ' : ch;
+		}
+		kfree(t->paste);
+		t->paste = NULL;
+	}
 	if (t->kt == t->kh)
 		return -1;
 	int k = t->keys[t->kt];
@@ -412,6 +598,8 @@ static void tw_clear(struct console *c)
 	for (int i = 0; i < t->cols * t->rows; i++)
 		t->grid[i] = (uint16_t)(t->attr << 8 | ' ');
 	t->cx = t->cy = 0;
+	t->view = 0;
+	t->sel = 0;
 	if (mirror_terms)
 		serial_putc('\n');
 	tw_redraw(t);
@@ -435,6 +623,11 @@ static void tw_gotoxy(struct console *c, int x, int y)
 {
 	struct termwin *t = c->priv;
 	int ox = t->cx, oy = t->cy;
+	if (mirror_terms && y != oy)
+		serial_putc('\n');	/* the COM1 transcript, line by line */
+	else if (mirror_terms && x > ox)
+		for (int i = ox; i < x && i < t->cols; i++)
+			serial_putc(' ');
 	t->cx = MAX(0, MIN(x, t->cols - 1));
 	t->cy = MAX(0, MIN(y, t->rows - 1));
 	if (ox < t->cols && oy < t->rows)
@@ -467,11 +660,21 @@ int console_is_termwin(struct console *c)
 struct launch {
 	char cmd[200];
 	int hold;
+	char dir[200];		/* start here ("": where the desktop is) */
+	char speed[12];		/* DOS programs' pace ("": as usual) */
 };
 
 static void term_task(void *arg)
 {
 	struct launch *l = arg;
+	struct task *me = task_current();
+	if (l->dir[0]) {
+		struct vstat st;
+		char abs[VFS_PATH_MAX];
+		if (!vfs_resolve(me->cwd, l->dir, abs, sizeof abs) && !vfs_stat(abs, &st) && st.type == VFS_DIR)
+			strncpy0(me->cwd, abs, sizeof me->cwd);
+	}
+	strncpy0(me->dos_speed, l->speed, sizeof me->dos_speed);
 	if (!l->cmd[0]) {
 		kfree(l);
 		shell_task(NULL);	/* an interactive shell */
@@ -488,8 +691,19 @@ static void term_task(void *arg)
 	}
 }
 
+static const struct winops term_ops;
+
+static struct win *open_term_in(struct wm *wm, const char *title, const char *cmd, int cols, int rows,
+    int x, int y, const char *dir, const char *speed);
+
 struct win *open_term(struct wm *wm, const char *title, const char *cmd, int cols, int rows,
     int x, int y)
+{
+	return open_term_in(wm, title, cmd, cols, rows, x, y, NULL, NULL);
+}
+
+static struct win *open_term_in(struct wm *wm, const char *title, const char *cmd, int cols, int rows,
+    int x, int y, const char *dir, const char *speed)
 {
 	int sw = wm->disp->surf->w, sh = wm->disp->surf->h;
 	cols = MAX(20, MIN(cols, (sw - 2 * BORDER - 24) / FONT_W));
@@ -517,8 +731,10 @@ struct win *open_term(struct wm *wm, const char *title, const char *cmd, int col
 	t->con.size = tw_size;
 	t->con.gotoxy = tw_gotoxy;
 	t->con.attr = tw_attr;
+	t->con.rawchar = tw_rawchar;
 	t->con.priv = t;
 	w->term = t;
+	w->ops = &term_ops;
 	for (int i = 0; i < cols * rows; i++)
 		t->grid[i] = 0x0720;
 	fill(&w->content, 0, 0, w->content.w, w->content.h, P(0));
@@ -526,6 +742,8 @@ struct win *open_term(struct wm *wm, const char *title, const char *cmd, int col
 	struct launch *l = kzalloc(sizeof *l);
 	strncpy0(l->cmd, cmd ? cmd : "", sizeof l->cmd);
 	l->hold = cmd && *cmd;
+	strncpy0(l->dir, dir ? dir : "", sizeof l->dir);
+	strncpy0(l->speed, speed ? speed : "", sizeof l->speed);
 	struct task *me = task_current();
 	void *save = me->desk;
 	me->desk = wm;		/* the new task inherits this desktop */
@@ -542,7 +760,51 @@ struct win *open_term(struct wm *wm, const char *title, const char *cmd, int col
 int control_open(void *wm, const char *applet);
 void clock_open(struct wm *wm);
 
+static void launch_cmd_in(struct wm *wm, const char *label, const char *cmd, const char *dir,
+    const char *speed);
+
+/* the applets (applets.c, installer.c) */
+int help_open(void *wm, const char *topic);
+int eyes_open(void *wm, const char *arg);
+int taskman_open(void *wm, const char *arg);
+int dialer_open(void *wm, const char *arg);
+int neko_open(void *wm, const char *arg);
+int mines_open_app(void *wm, const char *arg);
+int calc_open(void *wm, const char *arg);
+int charmap_open(void *wm, const char *arg);
+static int install_app(void *wm, const char *arg)
+{
+	extern int installer_open(void *wm);
+	(void)arg;
+	return installer_open(wm);
+}
+
+/* a Program Manager item: where it starts, minimized or not, how fast DOS runs */
+void launch_item(struct wm *wm, const char *label, const char *cmd, const char *dir, int minimized,
+    const char *speed)
+{
+	struct win *before = topmost(wm);
+	int n0 = 0, n1 = 0;
+	for (struct win *w = wm->wins; w; w = w->next)
+		n0++;
+	launch_cmd_in(wm, label, cmd, dir, speed);
+	for (struct win *w = wm->wins; w; w = w->next)
+		n1++;
+	struct win *after = topmost(wm);
+	if (minimized && n1 > n0 && after && after != before && after != wm->progman) {
+		win_minimize(after, 1);
+		if (before && !before->minimized)
+			raise_win(wm, before);	/* the keyboard stays where it was */
+	}
+}
+
 void launch_cmd(struct wm *wm, const char *label, const char *cmd)
+{
+	launch_cmd_in(wm, label, cmd, NULL, NULL);
+}
+
+static void launch_cmd_in(struct wm *wm, const char *label, const char *cmd, const char *dir,
+    const char *speed)
 {
 	if (!strncasecmp(cmd, "@control", 8)) {
 		const char *a = cmd + 8;
@@ -555,12 +817,35 @@ void launch_cmd(struct wm *wm, const char *label, const char *cmd)
 		clock_open(wm);
 		return;
 	}
+	if (!strcasecmp(cmd, "@pulse")) {
+		extern void pulse_open(struct wm *wm);
+		pulse_open(wm);
+		return;
+	}
+	/* the applets with windows of their own */
+	{
+		static const struct { const char *name; int (*open)(void *wm, const char *arg); } apps[] = {
+			{ "@install", install_app }, { "@help", help_open }, { "@eyes", eyes_open },
+			{ "@taskman", taskman_open }, { "@terminal", dialer_open }, { "@neko", neko_open },
+			{ "@mines", mines_open_app }, { "@calc", calc_open }, { "@charmap", charmap_open },
+		};
+		for (size_t i = 0; i < NELEM(apps); i++) {
+			size_t n = strlen(apps[i].name);
+			if (!strncasecmp(cmd, apps[i].name, n) && (!cmd[n] || cmd[n] == ' ')) {
+				const char *arg = cmd + n;
+				while (*arg == ' ')
+					arg++;
+				apps[i].open(wm, arg);
+				return;
+			}
+		}
+	}
 	/* plain commands that bring their own window */
 	if (!strncasecmp(cmd, "@files", 6)) {
 		const char *d = cmd + 6;
 		while (*d == ' ')
 			d++;
-		open_files(wm, *d ? d : task_current()->cwd);
+		open_files(wm, *d ? d : dir && *dir ? dir : task_current()->cwd);
 		return;
 	}
 	if (!strcasecmp(cmd, "@progman")) {
@@ -572,7 +857,7 @@ void launch_cmd(struct wm *wm, const char *label, const char *cmd)
 		}
 		return;
 	}
-	open_term(wm, label, cmd, 80, 25, -1, -1);
+	open_term_in(wm, label, cmd, 80, 25, -1, -1, dir, speed);
 }
 
 /* An icon for a file, by what it is. */
@@ -594,6 +879,65 @@ const char *icon_for_file(const char *name, int is_dir)
 	return "file";
 }
 
+/*
+ * A Program Manager item (.LNK): the command on the first line, then
+ * optional lines
+ *   dir=C:\GAMES\KEEN     start there
+ *   run=minimized
+ *   speed=386             DOS programs' pace (dos.speed's words)
+ */
+int lnk_read(const char *path, struct lnk *l)
+{
+	memset(l, 0, sizeof *l);
+	size_t len;
+	int err;
+	char *body = vfs_slurp(path, &len, &err);
+	if (!body)
+		return err ? err : E_NOENT;
+	int first = 1;
+	for (char *p = body; *p; ) {
+		char *e = p;
+		while (*e && *e != '\r' && *e != '\n')
+			e++;
+		char save = *e;
+		*e = 0;
+		if (first)
+			strncpy0(l->cmd, p, sizeof l->cmd);
+		else if (!strncasecmp(p, "dir=", 4))
+			strncpy0(l->dir, p + 4, sizeof l->dir);
+		else if (!strncasecmp(p, "speed=", 6))
+			strncpy0(l->speed, p + 6, sizeof l->speed);
+		else if (!strncasecmp(p, "run=", 4))
+			l->minimized = !strncasecmp(p + 4, "min", 3);
+		first = 0;
+		*e = save;
+		p = e;
+		if (*p == '\r')
+			p++;
+		if (*p == '\n')
+			p++;
+		if (!save)
+			break;
+	}
+	kfree(body);
+	return 0;
+}
+
+int lnk_write(const char *path, const struct lnk *l)
+{
+	char buf[512];
+	int n = snprintf(buf, sizeof buf, "%s\r\n", l->cmd);
+	if (l->dir[0])
+		n += snprintf(buf + n, sizeof buf - (size_t)n, "dir=%s\r\n", l->dir);
+	if (l->minimized)
+		n += snprintf(buf + n, sizeof buf - (size_t)n, "run=minimized\r\n");
+	if (l->speed[0])
+		n += snprintf(buf + n, sizeof buf - (size_t)n, "speed=%s\r\n", l->speed);
+	if (!l->dir[0] && !l->minimized && !l->speed[0])
+		n = (int)strlen(l->cmd);	/* just the command, as before */
+	return vfs_spew(path, buf, (size_t)n);
+}
+
 /* Open a file the obvious way: run programs, edit text, browse folders. */
 void launch_path(struct wm *wm, const char *path)
 {
@@ -609,23 +953,15 @@ void launch_path(struct wm *wm, const char *path)
 	const char *dot = strrchr(path, '.');
 	char cmd[VFS_PATH_MAX + 16];
 	if (dot && !strcasecmp(dot, ".LNK")) {
-		/* a Program Manager item: its first line is the command */
-		size_t len;
-		int err;
-		char *body = vfs_slurp(path, &len, &err);
-		if (!body)
+		struct lnk l;
+		if (lnk_read(path, &l))
 			return;
-		char *e = body;
-		while (*e && *e != '\r' && *e != '\n')
-			e++;
-		*e = 0;
 		char label[64];
 		strncpy0(label, vfs_basename(path), sizeof label);
 		char *ld = strrchr(label, '.');
 		if (ld)
 			*ld = 0;
-		launch_cmd(wm, label, body);
-		kfree(body);
+		launch_item(wm, label, l.cmd, l.dir, l.minimized, l.speed);
 		return;
 	}
 	if (dot && (!strcasecmp(dot, ".BAS") || !strcasecmp(dot, ".BAT") || !strcasecmp(dot, ".COM") ||
@@ -643,6 +979,266 @@ void term_type(struct win *w, const char *text)
 		return;
 	for (const char *p = text; *p; p++)
 		tw_key(w->term, (unsigned char)*p);
+}
+
+
+/* ---- the text clipboard, and selecting text in terminal windows ------------------------- */
+
+static char *clip_text;
+static size_t clip_len;
+static uint64_t clip_last_write;
+static struct task *clip_writer;
+
+void clip_text_set(const char *text, size_t n)
+{
+	char *c = kmalloc(n + 1);
+	if (!c)
+		return;
+	memcpy(c, text, n);
+	c[n] = 0;
+	kfree(clip_text);
+	clip_text = c;
+	clip_len = n;
+}
+
+const char *clip_text_get(void)
+{
+	return clip_text ? clip_text : "";
+}
+
+/* the selection as text: lines end in \r\n, trailing blanks dropped */
+static char *tw_sel_text(struct termwin *t, size_t *out_n)
+{
+	int al = t->sa_line, ac = t->sa_col, bl = t->se_line, bc = t->se_col;
+	if (bl < al || (bl == al && bc < ac)) {
+		int x = al; al = bl; bl = x;
+		x = ac; ac = bc; bc = x;
+	}
+	size_t cap = (size_t)(bl - al + 1) * (size_t)(t->cols + 2) + 1, n = 0;
+	char *buf = kmalloc(cap);
+	if (!buf)
+		return NULL;
+	for (int L = al; L <= bl; L++) {
+		int len;
+		const uint16_t *ln = tw_line(t, L, &len);
+		int from = L == al ? ac : 0, to = L == bl ? MIN(bc + 1, len) : len;
+		int end = to;
+		while (end > from && ln && (ln[end - 1] & 0xFF) == ' ')
+			end--;
+		for (int c = from; c < end; c++) {
+			unsigned char ch = (unsigned char)(ln[c] & 0xFF);
+			buf[n++] = ch < 0x20 ? ' ' : (char)ch;
+		}
+		if (L < bl) {
+			buf[n++] = '\r';
+			buf[n++] = '\n';
+		}
+	}
+	buf[n] = 0;
+	*out_n = n;
+	return buf;
+}
+
+static void tw_copy(struct termwin *t)
+{
+	if (!t->sel)
+		return;
+	size_t n;
+	char *txt = tw_sel_text(t, &n);
+	if (txt) {
+		clip_text_set(txt, n);
+		kfree(txt);
+	}
+}
+
+static void tw_paste(struct termwin *t)
+{
+	if (!clip_text || !clip_len || t->closed)
+		return;
+	char *c = kstrdup(clip_text);
+	if (!c)
+		return;
+	/* a paste in the middle of another: the rest of that first */
+	if (t->paste && t->paste[t->paste_pos]) {
+		size_t a = strlen(t->paste + t->paste_pos), b = strlen(c);
+		char *j = kmalloc(a + b + 1);
+		if (j) {
+			memcpy(j, t->paste + t->paste_pos, a);
+			memcpy(j + a, c, b + 1);
+		}
+		kfree(c);
+		c = j;
+	}
+	kfree(t->paste);
+	t->paste = c;
+	t->paste_pos = 0;
+	if (t->view)
+		tw_view(t, -t->view);
+}
+
+static void tw_select_all(struct termwin *t)
+{
+	t->sel = 1;
+	t->sa_line = 0;
+	t->sa_col = 0;
+	t->se_line = t->sbcount + t->rows - 1;
+	t->se_col = t->cols - 1;
+	tw_redraw(t);
+}
+
+static void tw_unselect(struct termwin *t)
+{
+	if (t->sel) {
+		t->sel = 0;
+		tw_redraw(t);
+	}
+}
+
+static int is_word(int ch)
+{
+	return isalnum(ch) || ch == '_' || ch == '-' || ch == '.' || ch == '\\' || ch == ':' || ch == '/';
+}
+
+static void term_mouse(struct win *w, int type, int x, int y, int buttons, int dbl)
+{
+	struct termwin *t = w->term;
+	if (!t || t->child)
+		return;
+	int c = MAX(0, MIN(x / FONT_W, t->cols - 1));
+	int sr = y / FONT_H;
+	/* dragging past the top or bottom scrolls */
+	if (t->selecting && type == EV_MOVE) {
+		if (y < 0)
+			tw_view(t, 1);
+		else if (sr >= t->rows)
+			tw_view(t, -1);
+	}
+	sr = MAX(0, MIN(sr, t->rows - 1));
+	int L = t->sbcount - t->view + sr;
+	if (type == EV_DOWN && (buttons & 4)) {	/* the middle button pastes */
+		tw_paste(t);
+		return;
+	}
+	if (type == EV_DOWN && (buttons & 1)) {
+		if (dbl) {	/* a word */
+			int len;
+			const uint16_t *ln = tw_line(t, L, &len);
+			if (!ln || c >= len || !is_word(ln[c] & 0xFF)) {
+				tw_unselect(t);
+				return;
+			}
+			int a = c, b = c;
+			while (a > 0 && is_word(ln[a - 1] & 0xFF))
+				a--;
+			while (b + 1 < len && is_word(ln[b + 1] & 0xFF))
+				b++;
+			t->sel = 1;
+			t->selecting = 0;
+			t->sa_line = t->se_line = L;
+			t->sa_col = a;
+			t->se_col = b;
+			tw_redraw(t);
+			return;
+		}
+		if ((buttons & MOD_SHIFT) && t->sel) {	/* stretch the one there is */
+			t->se_line = L;
+			t->se_col = c;
+			t->selecting = 1;
+			tw_redraw(t);
+			return;
+		}
+		tw_unselect(t);
+		t->selecting = 1;
+		t->sa_line = t->se_line = L;
+		t->sa_col = t->se_col = c;
+		return;
+	}
+	if (type == EV_MOVE && t->selecting) {
+		if (L != t->se_line || c != t->se_col || !t->sel) {
+			t->sel = 1;
+			t->se_line = L;
+			t->se_col = c;
+			tw_redraw(t);
+		}
+		return;
+	}
+	if (type == EV_UP)
+		t->selecting = 0;
+}
+
+static void term_pick(struct wm *wm, void *arg, int id)
+{
+	(void)wm;
+	struct win *w = arg;
+	struct termwin *t = w->term;
+	if (!t)
+		return;
+	switch (id) {
+	case 1: tw_copy(t); tw_unselect(t); break;
+	case 2: tw_paste(t); break;
+	case 3: tw_select_all(t); break;
+	case 4: tw_free_history(t); tw_redraw(t); break;
+	}
+}
+
+static void term_context(struct win *w, int x, int y)
+{
+	struct termwin *t = w->term;
+	if (!t || t->child)
+		return;
+	struct menu_item it[MENU_MAX];
+	int n = 0;
+	menu_put(it, &n, "&Copy\tCtrl+Ins", t->sel ? 0 : MI_DISABLED, 1);
+	menu_put(it, &n, "&Paste\tShift+Ins", clip_len ? 0 : MI_DISABLED, 2);
+	menu_put(it, &n, "", MI_SEP, 0);
+	menu_put(it, &n, "Select &All", 0, 3);
+	menu_put(it, &n, "Clear &Scrollback", t->sbcount ? 0 : MI_DISABLED, 4);
+	popup_open(w->wm, w->x + CLIENT_X + x, w->y + CLIENT_Y + y, it, n, term_pick, w, w);
+}
+
+static void term_wheel(struct win *w, int x, int y, int clicks)
+{
+	(void)x;
+	(void)y;
+	if (w->term && !w->term->child)
+		tw_view(w->term, clicks * 3);
+}
+
+static const struct winops term_ops = {
+	.mouse = term_mouse,
+	.context = term_context,
+	.wheel = term_wheel,
+	.icon = "prompt",
+};
+
+/* Keys the terminal itself takes: Shift+PgUp/PgDn, copy and paste.
+ * mods: 1 Shift, 2 Ctrl, 4 Alt. 1 if it took the key. */
+static int term_key(struct termwin *t, int k, int mods)
+{
+	int shift = mods & 1, ctrl = mods & 2;
+	if (shift && !ctrl && (k == KEY_PGUP || k == KEY_PGDN)) {
+		tw_view(t, (k == KEY_PGUP ? 1 : -1) * MAX(1, t->rows - 1));
+		return 1;
+	}
+	if (shift && ctrl && (k == KEY_HOME || k == KEY_END)) {
+		tw_view(t, k == KEY_HOME ? t->sbcount : -t->view);
+		return 1;
+	}
+	if ((ctrl && shift && (k == 3 || (k | 0x20) == 'c')) || (ctrl && !shift && k == KEY_INS)) {
+		tw_copy(t);
+		tw_unselect(t);
+		return 1;
+	}
+	if ((ctrl && shift && (k == 22 || (k | 0x20) == 'v')) || (shift && !ctrl && k == KEY_INS)) {
+		tw_paste(t);
+		return 1;
+	}
+	/* anything else is typing: back to the live screen */
+	if (t->view)
+		tw_view(t, -t->view);
+	if (t->sel && !t->selecting)
+		tw_unselect(t);
+	return 0;
 }
 
 /* ---- dialogs ---------------------------------------------------------------------- */
@@ -755,6 +1351,13 @@ static void dialog_key(struct wm *wm, struct win *w, int k)
 	size_t l = strlen(d->field);
 	if (k == '\b' && l)
 		d->field[l - 1] = 0;
+	else if (k == 22 || (k == KEY_INS && ((input_mods() | wm->rawmods) & 1))) {	/* paste */
+		for (const char *p = clip_text_get(); *p && *p != '\r' && *p != '\n' && l < 48; p++)
+			if ((unsigned char)*p >= 0x20 && (unsigned char)*p < 0x7F)
+				d->field[l++] = *p;
+		d->field[l] = 0;
+	} else if (k == 3)
+		clip_text_set(d->field, l);
 	else if (k >= 0x20 && k < 0x7F && l + 1 < sizeof d->field && l < 48) {
 		d->field[l] = (char)k;
 		d->field[l + 1] = 0;
@@ -865,7 +1468,7 @@ void exit_desktop(struct wm *wm)
 
 enum {
 	DM_SHELL = 1, DM_FILES, DM_PROGMAN, DM_CONTROL, DM_THEMES, DM_DESKTOP, DM_CASCADE, DM_TILE,
-	DM_ABOUT, DM_EXIT, DM_CLOCK,
+	DM_ABOUT, DM_EXIT, DM_CLOCK, DM_PULSE,
 };
 
 static void desktop_pick(struct wm *wm, void *arg, int id)
@@ -883,6 +1486,7 @@ static void desktop_pick(struct wm *wm, void *arg, int id)
 	case DM_CASCADE: tile(wm, 1); break;
 	case DM_TILE: tile(wm, 0); break;
 	case DM_CLOCK: clock_open(wm); break;
+	case DM_PULSE: launch_cmd(wm, "Pulse", "@pulse"); break;
 	case DM_ABOUT: about(wm); break;
 	case DM_EXIT: exit_desktop(wm); break;
 	}
@@ -894,7 +1498,7 @@ void desktop_menu(struct wm *wm, int x, int y)
 	static const struct menu_item items[] = {
 		{ "&New Shell\tAlt+N", 0, DM_SHELL }, { "&File Manager", 0, DM_FILES },
 		{ "&Program Manager", 0, DM_PROGMAN }, { "C&ontrol Panel", 0, DM_CONTROL },
-		{ "C&lock", 0, DM_CLOCK },
+		{ "C&lock", 0, DM_CLOCK }, { "P&ulse", 0, DM_PULSE },
 		{ "", MI_SEP, 0 },
 		{ "&Themes...", 0, DM_THEMES }, { "&Desktop...", 0, DM_DESKTOP },
 		{ "", MI_SEP, 0 },
@@ -905,7 +1509,17 @@ void desktop_menu(struct wm *wm, int x, int y)
 	popup_open(wm, x, y, items, (int)NELEM(items), desktop_pick, NULL, NULL);
 }
 
-enum { CM_RESTORE = 1, CM_MINIMIZE, CM_MAXIMIZE, CM_CLOSE, CM_NEXT };
+enum { CM_RESTORE = 1, CM_MINIMIZE, CM_MAXIMIZE, CM_CLOSE, CM_NEXT, CM_MOVE, CM_SIZE };
+
+/* Move and Size from the control menu: the arrow keys move an outline, Enter puts it there */
+static void kb_track(struct wm *wm, struct win *w, int mode)
+{
+	wm->kbmove = w;
+	wm->kbmode = mode;
+	wm->ghost = frame_rect(w);
+	wm->rs_orig = wm->ghost;
+	wm_dirty(wm, wm->ghost);
+}
 
 static void control_pick(struct wm *wm, void *arg, int id)
 {
@@ -931,15 +1545,19 @@ static void control_pick(struct wm *wm, void *arg, int id)
 		break;
 	case CM_CLOSE: close_request(wm, w); break;
 	case CM_NEXT: next_window(wm); break;
+	case CM_MOVE: kb_track(wm, w, 1); break;
+	case CM_SIZE: kb_track(wm, w, 2); break;
 	}
 }
 
 /* the Windows 3.1 control menu: click the box at the left of a title bar */
 void control_menu(struct wm *wm, struct win *w, int x, int y)
 {
-	struct menu_item items[8];
+	struct menu_item items[12];
 	int n = 0;
 	items[n++] = (struct menu_item){ "&Restore", (w->maximized || w->minimized) ? 0 : MI_DISABLED, CM_RESTORE };
+	items[n++] = (struct menu_item){ "&Move", (w->maximized || w->minimized) ? MI_DISABLED : 0, CM_MOVE };
+	items[n++] = (struct menu_item){ "&Size", (win_can_resize(w) && !w->maximized && !w->minimized) ? 0 : MI_DISABLED, CM_SIZE };
 	items[n++] = (struct menu_item){ "Mi&nimize", (w->minimizable && !w->minimized) ? 0 : MI_DISABLED, CM_MINIMIZE };
 	items[n++] = (struct menu_item){ "Ma&ximize", (win_can_resize(w) && !w->maximized) ? 0 : MI_DISABLED, CM_MAXIMIZE };
 	items[n++] = (struct menu_item){ "", MI_SEP, 0 };
@@ -1009,7 +1627,7 @@ static int win_min_ch(struct win *w)
 
 int win_can_resize(struct win *w)
 {
-	return w->resizable && !(w->term && w->term->child);
+	return w->resizable;
 }
 
 /* Give a window a new frame. Terminals snap to whole character cells and
@@ -1022,10 +1640,12 @@ void win_resize(struct win *w, int x, int y, int fw, int fh)
 	struct termwin *t = w->kind == W_TERM ? w->term : NULL;
 	int cols = 0, rows = 0;
 	if (t) {
-		cols = MIN(cw / FONT_W, 250);
-		rows = MIN(ch / FONT_H, 120);
-		cw = cols * FONT_W;
-		ch = rows * FONT_H;
+		cols = MAX(1, MIN(cw / FONT_W, 250));
+		rows = MAX(1, MIN(ch / FONT_H, 120));
+		if (!t->child) {	/* text snaps to whole cells; a game or desktop in it needn't */
+			cw = cols * FONT_W;
+			ch = rows * FONT_H;
+		}
 	}
 	wm_dirty(wm, frame_rect(w));
 	w->x = x;
@@ -1054,6 +1674,11 @@ void win_resize(struct win *w, int x, int y, int fw, int fh)
 		for (int i = 0; i < cols * rows; i++)
 			grid[i] = 0x0720;
 		int shift = MAX(0, t->cy - (rows - 1));
+		if (!t->child)
+			for (int r = 0; r < shift; r++)
+				tw_push_history(t, t->grid + r * t->cols, t->cols);
+		t->view = 0;
+		t->sel = t->selecting = 0;
 		for (int r = 0; r < rows && r + shift < t->rows; r++)
 			for (int c = 0; c < cols && c < t->cols; c++)
 				grid[r * cols + c] = t->grid[(r + shift) * t->cols + c];
@@ -1064,6 +1689,11 @@ void win_resize(struct win *w, int x, int y, int fw, int fh)
 		t->cy -= shift;
 		t->cx = MIN(t->cx, cols);
 		tw_redraw(t);
+		if (t->child) {		/* the display in it: tell it, and show it again */
+			struct event e = { EV_RESIZE, cw, ch, 0, 0 };
+			evq_push(&t->child_ev, &e);
+			win_dirty_all(w);
+		}
 		return;
 	}
 	if (w->kind == W_CANVAS) {
@@ -1100,7 +1730,7 @@ static int edge_at(struct win *w, int x, int y)
 	int lx = x - w->x, ly = y - w->y;
 	if (lx < 0 || ly < 0 || lx >= w->w || ly >= w->h)
 		return 0;
-	int e = 0, corner = 18;
+	int e = 0, corner = 24;
 	if (lx < GRIP)
 		e |= 1;
 	else if (lx >= w->w - GRIP)
@@ -1275,7 +1905,10 @@ static void draw_min_icon(struct wm *wm, struct surface *s, struct win *w)
 	struct rect r = icon_rect(wm, w);
 	const char *icon = w->ops && w->ops->icon ? w->ops->icon :
 	    w->kind == W_TERM ? "prompt" : w->kind == W_CANVAS ? "gear" : w->kind == W_PROGMAN ? "group" : "file";
-	draw_icon(s, r.x + (r.w - 32) / 2, r.y + 4, icon);
+	if (w->ops && w->ops->draw_icon)
+		w->ops->draw_icon(w, s, r.x + (r.w - 32) / 2, r.y + 4);
+	else
+		draw_icon(s, r.x + (r.w - 32) / 2, r.y + 4, icon);
 	/* "File Manager - C:\DEMOS" is just "File Manager" down here */
 	char label[16];
 	int max = r.w / FONT_W - 1;
@@ -1320,7 +1953,7 @@ static void compose(struct wm *wm, struct rect r)
 			text(s, wm->mx + 12, wm->my + 10, n, P(0xFFFFFF));
 		}
 	}
-	if (wm->resizing) {
+	if (wm->resizing || wm->kbmove) {
 		struct rect g = wm->ghost;
 		outline(s, g.x, g.y, g.w, g.h, P(0));
 		outline(s, g.x + 1, g.y + 1, g.w - 2, g.h - 2, P(0xFFFFFF));
@@ -1372,8 +2005,52 @@ static int raw_window(struct win *w)
 	return w && (w->kind == W_CANVAS || (w->term && w->term->child));
 }
 
+static void kb_track_key(struct wm *wm, int k)
+{
+	struct win *w = wm->kbmove;
+	int alive = 0;
+	for (struct win *v = wm->wins; v; v = v->next)
+		alive |= v == w;
+	struct rect g = wm->ghost;
+	int step = 8;
+	if (!alive || k == 27) {
+		wm->kbmove = NULL;
+		wm_dirty(wm, g);
+		return;
+	}
+	if (k == '\n') {
+		wm->kbmove = NULL;
+		wm_dirty(wm, g);
+		win_resize(w, g.x, g.y, g.w, g.h);
+		return;
+	}
+	int sw = wm->disp->surf->w, sh = wm->disp->surf->h;
+	if (wm->kbmode == 1) {
+		if (k == KEY_LEFT) g.x -= step;
+		if (k == KEY_RIGHT) g.x += step;
+		if (k == KEY_UP) g.y -= step;
+		if (k == KEY_DOWN) g.y += step;
+		g.x = MAX(-g.w + 40, MIN(g.x, sw - 40));
+		g.y = MAX(0, MIN(g.y, sh - 20));
+	} else {
+		if (k == KEY_LEFT) g.w -= step;
+		if (k == KEY_RIGHT) g.w += step;
+		if (k == KEY_UP) g.h -= step;
+		if (k == KEY_DOWN) g.h += step;
+		g.w = MAX(g.w, 120);
+		g.h = MAX(g.h, 60);
+	}
+	wm_dirty(wm, wm->ghost);
+	wm->ghost = g;
+	wm_dirty(wm, g);
+}
+
 static void handle_key(struct wm *wm, int k)
 {
+	if (wm->kbmove) {
+		kb_track_key(wm, k);
+		return;
+	}
 	if (wm->popup) {
 		popup_key(wm, k);
 		return;
@@ -1391,12 +2068,17 @@ static void handle_key(struct wm *wm, int k)
 			int wd = (int)strlen(mb->titles[i]) * FONT_W + 12;
 			if (toupper(mb->titles[i][0]) == toupper(k & 0xFF)) {
 				f->ops->mouse(f, EV_DOWN, x + 3, 3, 1, 0);
+				popup_select_first(wm);
 				return;
 			}
 			x += wd;
 		}
 	}
 	/* desktop-wide keys */
+	if (k == 27 && ((input_mods() | wm->rawmods) & 2)) {	/* Ctrl+Esc: the Task Manager */
+		taskman_open(wm, NULL);
+		return;
+	}
 	if (k == (KEY_ALT | 'n')) {
 		open_term(wm, "Shell", NULL, 80, 25, -1, -1);
 		return;
@@ -1426,6 +2108,9 @@ static void handle_key(struct wm *wm, int k)
 			win_minimize(w, 0);
 		return;
 	}
+	if (w->kind == W_TERM && w->term && !w->term->child &&
+	    term_key(w->term, k, input_mods() | wm->rawmods))
+		return;
 	if (w->ops && w->ops->key) {
 		w->ops->key(w, k);
 		return;
@@ -1441,14 +2126,15 @@ static struct rect ptr_rect(struct wm *wm)
 
 static void update_pointer_shape(struct wm *wm, struct win *w)
 {
-	if (!wm->disp->draws_pointer)
-		return;
 	int shape = wm->resizing ? wm->rs_edges : (wm->drag || wm->grab || wm->dnd.active) ? 0 :
 	    edge_at(w, wm->mx, wm->my);
-	if (shape != wm->ptr) {
-		wm->ptr = shape;
+	if (shape == wm->ptr)
+		return;
+	wm->ptr = shape;
+	if (wm->disp->draws_pointer)
 		wm_dirty(wm, ptr_rect(wm));
-	}
+	else if (wm->disp->pointer)
+		wm->disp->pointer(wm->disp, shape);	/* bterm shows its own */
 }
 
 static void deliver(struct win *w, int type, int x, int y, int buttons, int dbl)
@@ -1688,6 +2374,73 @@ static void check_terms(struct wm *wm)
 	reap_zombies();
 }
 
+/* the display changed size (a window a nested desktop is in, bterm's window):
+ * keep everything on it, maximized windows filling it */
+static void wm_display_resized(struct wm *wm)
+{
+	struct surface *s = wm->disp->surf;
+	for (struct win *w = wm->wins; w; w = w->next) {
+		if (w->maximized) {
+			win_resize(w, 0, 0, s->w, s->h);
+			continue;
+		}
+		int fw = MIN(w->w, s->w), fh = MIN(w->h, s->h);
+		int x = MAX(0, MIN(w->x, s->w - fw)), y = MAX(0, MIN(w->y, s->h - fh));
+		if (fw != w->w || fh != w->h)
+			win_resize(w, x, y, fw, fh);
+		else {
+			w->x = x;
+			w->y = y;
+		}
+	}
+	wm->mx = MIN(wm->mx, s->w - 1);
+	wm->my = MIN(wm->my, s->h - 1);
+	wm->dirty = (struct rect){ 0, 0, 0, 0 };
+	wm_dirty(wm, (struct rect){ 0, 0, s->w, s->h });
+}
+
+/* Shift, Ctrl and Alt from the make/break codes, for keys that come without
+ * them (a bterm's keyboard isn't this machine's) */
+static void track_rawmods(struct wm *wm, int sc)
+{
+	if (sc == 0xE0) {
+		wm->raw_e0 = 1;
+		return;
+	}
+	int e0 = wm->raw_e0, bit = 0;
+	wm->raw_e0 = 0;
+	switch (sc & 0x7F) {
+	case 0x2A: case 0x36: bit = e0 ? 0 : 1; break;	/* E0 2A: the fake shift */
+	case 0x1D: bit = 2; break;
+	case 0x38: bit = 4; break;
+	}
+	if (!bit)
+		return;
+	if (sc & 0x80)
+		wm->rawmods &= ~bit;
+	else
+		wm->rawmods |= bit;
+}
+
+/* the wheel: to the window under the pointer, as Windows 10 does */
+static void handle_wheel(struct wm *wm, struct event *e)
+{
+	if (wm->popup || wm->dnd.active || wm->resizing || wm->drag)
+		return;
+	struct win *w = win_at(wm, e->x, e->y);
+	if (!w)
+		return;
+	int lx = e->x - w->x - CLIENT_X, ly = e->y - w->y - CLIENT_Y;
+	if (raw_window(w)) {
+		struct event le = *e;
+		le.x = lx;
+		le.y = ly;
+		send_to_window(w, &le);
+	} else if (w->ops && w->ops->wheel) {
+		w->ops->wheel(w, lx, ly, e->key);
+	}
+}
+
 static void wm_loop(struct wm *wm)
 {
 	struct surface *s = wm->disp->surf;
@@ -1699,8 +2452,19 @@ static void wm_loop(struct wm *wm)
 			busy = 1;
 			if (e.type == EV_KEY)
 				handle_key(wm, e.key);
-			else if (e.type == EV_CLOSE)
+			else if (e.type == EV_RAWKEY) {
+				track_rawmods(wm, e.key);
+				/* make/break codes: only for a window hosting a display (a DOS
+				 * game, a nested desktop) */
+				struct win *f = wm->focus;
+				if (f && !wm->popup && f->kind == W_TERM && f->term && f->term->child)
+					evq_push(&f->term->child_ev, &e);
+			} else if (e.type == EV_CLOSE)
 				wm->running = 0;
+			else if (e.type == EV_RESIZE)
+				wm_display_resized(wm);
+			else if (e.type == EV_WHEEL)
+				handle_wheel(wm, &e);
 			else
 				handle_mouse(wm, &e);
 		}
@@ -1771,6 +2535,10 @@ int desktop_run_on(struct display *d, const char *title)
 	if (d->attach)
 		d->attach(d, wm);
 	open_progman(wm);
+	if (!wm->depth) {
+		extern void progman_startup(struct wm *wm);
+		progman_startup(wm);
+	}
 	wm_loop(wm);
 	wm_shutdown(wm);
 
@@ -1808,6 +2576,11 @@ static void scr_flush(struct display *d, struct rect r)
 static int scr_event(struct display *d, struct event *e)
 {
 	struct screen_disp *sd = (struct screen_disp *)d;
+	int raw = input_getraw();
+	if (raw >= 0) {
+		*e = (struct event){ EV_RAWKEY, sd->mx, sd->my, sd->buttons, raw };
+		return 1;
+	}
 	int k = input_getkey();
 	if (k < 0)
 		k = serial_console()->getkey(serial_console());
@@ -1817,6 +2590,10 @@ static int scr_event(struct display *d, struct event *e)
 	}
 	struct mouse_event m;
 	if (input_getmouse(&m)) {
+		if (m.wheel) {
+			*e = (struct event){ EV_WHEEL, sd->mx, sd->my, sd->buttons | (input_mods() << 8), m.wheel };
+			return 1;
+		}
 		if (m.abs) {	/* vmmouse: the pointer sits exactly under the host's */
 			sd->mx = MIN((int)((int64_t)m.ax * sd->back.w / 65535), sd->back.w - 1);
 			sd->my = MIN((int)((int64_t)m.ay * sd->back.h / 65535), sd->back.h - 1);
@@ -1840,6 +2617,7 @@ static int scr_event(struct display *d, struct event *e)
 struct term_disp {
 	struct display d;
 	struct termwin *t;
+	int orig_w, orig_h;	/* the window's size before a program asked for another */
 };
 
 static void td_flush(struct display *d, struct rect r)
@@ -1920,6 +2698,39 @@ struct display *display_open(struct console *c, int *err)
 	return NULL;
 }
 
+/* A program wants w x h pixels (0, 0: back to how it was). Windows grow or
+ * shrink to fit, within the screen; the full screen is what it is. */
+int display_want_size(struct display *d, int w, int h)
+{
+	if (!strcmp(d->name, "screen"))
+		return 0;
+	struct term_disp *td = (struct term_disp *)d;
+	struct termwin *t = td->t;
+	struct win *win = t->win;
+	if (!win || t->closed || !win->wm)
+		return -1;
+	if (!td->orig_w) {
+		td->orig_w = win->w;
+		td->orig_h = win->h;
+	}
+	if (!w) {
+		w = td->orig_w;
+		h = td->orig_h;
+	} else {
+		w += 2 * BORDER;
+		h += 2 * BORDER + TITLE_H;
+	}
+	struct surface *scr = win->wm->disp->surf;
+	w = MIN(w, scr->w);
+	h = MIN(h, scr->h);
+	int x = MIN(win->x, scr->w - w), y = MIN(win->y, scr->h - h);
+	if (win->maximized)
+		return 0;
+	win_resize(win, MAX(0, x), MAX(0, y), w, h);
+	d->surf = &win->content;
+	return 0;
+}
+
 void display_close(struct display *d)
 {
 	if (!strcmp(d->name, "screen")) {
@@ -1931,6 +2742,8 @@ void display_close(struct display *d)
 	}
 	struct term_disp *td = (struct term_disp *)d;
 	struct termwin *t = td->t;
+	if (td->orig_w)
+		display_want_size(d, 0, 0);
 	t->child = 0;
 	if (!t->closed && t->win) {
 		tw_redraw(t);
@@ -2320,6 +3133,21 @@ static void desk_command(struct wm *wm, char *line)
 				strcat0(cmd, " ", sizeof cmd);
 		}
 		launch_cmd(wm, cmd, cmd);
+	} else if (!strcasecmp(w[0], "raise") && n > 1) {
+		/* bring a window forward by its title (the rest of the line) */
+		char title[64] = "";
+		for (int i = 1; i < n; i++) {
+			strcat0(title, w[i], sizeof title);
+			if (i + 1 < n)
+				strcat0(title, " ", sizeof title);
+		}
+		for (struct win *v = wm->wins; v; v = v->next)
+			if (!strcasecmp(v->title, title)) {
+				if (v->minimized)
+					win_minimize(v, 0);
+				raise_win(wm, v);
+				break;
+			}
 	} else if (!strcasecmp(w[0], "files")) {
 		open_files(wm, n > 1 ? w[1] : task_current()->cwd);
 	} else if (!strcasecmp(w[0], "tile")) {
@@ -2375,9 +3203,14 @@ static long desk_read(struct chardev *d, void *buf, size_t n)
 		    wm->depth, wm->disp->surf->w, wm->disp->surf->h, nw, wm->desktop);
 		/* one line per window, bottom first: id x y w h focus "title" */
 		for (struct win *w = wm->wins; w && len < (int)sizeof info - 100; w = w->next)
-			len += snprintf(info + len, sizeof info - (size_t)len, "window %d %d %d %d %d%s%s \"%s\"\n",
+		{
+			char back[24] = "";
+			if (w->term && w->term->view)
+				snprintf(back, sizeof back, " back %d", w->term->view);
+			len += snprintf(info + len, sizeof info - (size_t)len, "window %d %d %d %d %d%s%s%s \"%s\"\n",
 			    w->id, w->x, w->y, w->w, w->h, w == wm->focus ? " focus" : "",
-			    w->minimized ? " minimized" : "", w->title);
+			    w->minimized ? " minimized" : "", back, w->title);
+		}
 	}
 	size_t c = MIN(n, (size_t)len);
 	memcpy(buf, info, c);
@@ -2450,6 +3283,39 @@ static long draw_write(struct chardev *d, const void *buf, size_t n)
 	return (long)n;
 }
 
+/* CLIP$: the text clipboard. TYPE CLIP$ shows it; DIR > CLIP$ fills it */
+static long clip_read(struct chardev *d, void *buf, size_t n)
+{
+	(void)d;
+	size_t c = MIN(n, clip_len);
+	memcpy(buf, clip_text_get(), c);
+	return (long)c;
+}
+
+static long clip_write(struct chardev *d, const void *buf, size_t n)
+{
+	(void)d;
+	/* one program's writes in quick succession are one piece of text */
+	uint64_t now = uptime_ms();
+	if (clip_writer == task_current() && now - clip_last_write < 500 && clip_text) {
+		char *j = kmalloc(clip_len + n + 1);
+		if (!j)
+			return E_NOMEM;
+		memcpy(j, clip_text, clip_len);
+		memcpy(j + clip_len, buf, n);
+		j[clip_len + n] = 0;
+		kfree(clip_text);
+		clip_text = j;
+		clip_len += n;
+	} else {
+		clip_text_set(buf, n);
+	}
+	clip_writer = task_current();
+	clip_last_write = now;
+	return (long)n;
+}
+
+static struct chardev clip_dev = { "CLIP$", clip_read, clip_write, NULL, 1 };
 static struct chardev desk_dev = { "DESK$", desk_read, desk_write, NULL, 1 };
 static struct chardev mouse_dev = { "MOUSE$", mouse_read, NULL, NULL, 1 };
 static struct chardev draw_dev = { "DRAW$", NULL, draw_write, NULL, 0 };
@@ -2489,6 +3355,7 @@ void desktop_init(void)
 	setting_watch(wm_settings);
 	themes_init();
 	dev_register(&desk_dev);
+	dev_register(&clip_dev);
 	dev_register(&mouse_dev);
 	dev_register(&draw_dev);
 	for (size_t i = 0; i < NELEM(desk_calls); i++)

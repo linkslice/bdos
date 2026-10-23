@@ -172,6 +172,17 @@ static void wc_attr(struct console *c, int fg, int bg)
 		w->parent->attr(w->parent, fg, bg);
 }
 
+static void wc_rawchar(struct console *c, int ch)
+{
+	struct wrapcon *w = (struct wrapcon *)c;
+	if (!w->capture && w->parent->rawchar) {
+		w->parent->rawchar(w->parent, ch);
+		return;
+	}
+	char x = ch >= 0x20 && ch != 0x7F ? (char)ch : ' ';
+	wc_write(c, &x, 1);
+}
+
 static void wrap_init(struct wrapcon *w, struct console *parent)
 {
 	memset(w, 0, sizeof *w);
@@ -183,6 +194,7 @@ static void wrap_init(struct wrapcon *w, struct console *parent)
 	w->c.size = wc_size;
 	w->c.gotoxy = wc_gotoxy;
 	w->c.attr = wc_attr;
+	w->c.rawchar = wc_rawchar;
 	w->parent = parent;
 }
 
@@ -659,6 +671,80 @@ static int cmd_rd(struct cmd *c)
 	if (!r)
 		r = vfs_rmdir(abs);
 	return r ? fail(c, arg(c, 0), r) : 0;
+}
+
+/* NTP: net/ntp.c */
+static int cmd_ntp(struct cmd *c)
+{
+	extern int ntp_cmd(int argc, char **argv);
+	return ntp_cmd(c->argc, c->argv);
+}
+
+/* FDISK, FORMAT, INSTALL: diskcmd.c */
+static int cmd_fdisk(struct cmd *c)
+{
+	extern int fdisk_cmd(int argc, char **argv);
+	return fdisk_cmd(c->argc, c->argv);
+}
+
+static int cmd_format(struct cmd *c)
+{
+	extern int format_cmd(int argc, char **argv);
+	return format_cmd(c->argc, c->argv);
+}
+
+static int cmd_install(struct cmd *c)
+{
+	extern int install_cmd(int argc, char **argv, void *desk);
+	return install_cmd(c->argc, c->argv, task_current()->desk);
+}
+
+/* SUBST [X: [path | /D]]: a drive letter for a directory */
+static int cmd_subst(struct cmd *c)
+{
+	const char *l = arg(c, 0);
+	if (!l) {
+		int any = 0;
+		for (char d = 'A'; d <= 'Z'; d++)
+			if (vfs_subst_target(d)) {
+				kprintf("%c: => %s\n", d, vfs_subst_target(d));
+				any = 1;
+			}
+		if (!any)
+			kprintf("No drives are substituted. SUBST A: T:\\GAME makes A: a folder.\n");
+		return 0;
+	}
+	if (!isalpha(l[0]) || (l[1] && (l[1] != ':' || l[2]))) {
+		kprintf("Usage: SUBST X: path   or   SUBST X: /D\n");
+		return 1;
+	}
+	if (has_flag(c, 'D')) {
+		int r = vfs_subst(l[0], NULL);
+		if (r)
+			kprintf("%c: is not substituted\n", toupper(l[0]));
+		return r ? 1 : 0;
+	}
+	if (!arg(c, 1)) {
+		const char *t = vfs_subst_target(l[0]);
+		kprintf(t ? "%c: => %s\n" : "%c: is not substituted\n", toupper(l[0]), t);
+		return t ? 0 : 1;
+	}
+	char abs[VFS_PATH_MAX];
+	char canon[VFS_PATH_MAX];
+	int r = resolve_path(arg(c, 1), abs, sizeof abs);
+	if (!r && !vfs_canon(abs, canon, sizeof canon))
+		strncpy0(abs, canon, sizeof abs);	/* as the disk spells it */
+	if (!r)
+		r = vfs_subst(l[0], abs);
+	if (r == E_EXIST) {
+		kprintf("%c: is a drive already\n", toupper(l[0]));
+		return 1;
+	}
+	if (r == E_INVAL) {
+		kprintf("Can't substitute %c: for %s\n", toupper(l[0]), abs);
+		return 1;
+	}
+	return r ? fail(c, arg(c, 1), r) : 0;
 }
 
 /* --- TYPE / cat --- */
@@ -1789,10 +1875,50 @@ static int cmd_basic(struct cmd *c)
 	return basic_run_file(abs, c->argc - 1, c->argv + 1);
 }
 
+/* A START'ed task shares its parent's screen but not its keyboard: the
+ * keys you type belong to whatever is in the foreground. */
+struct bgcon {
+	struct console con;
+	struct console *parent;
+};
+
+static void bg_write(struct console *c, const char *s, size_t n)
+{
+	struct console *p = ((struct bgcon *)c->priv)->parent;
+	p->write(p, s, n);
+}
+
+static int bg_getkey(struct console *c)
+{
+	(void)c;
+	return -1;
+}
+
+static void bg_clear(struct console *c)
+{
+	(void)c;	/* not the background's screen to clear */
+}
+
+static void bg_cursor(struct console *c, int on)
+{
+	(void)c;
+	(void)on;
+}
+
+static void bg_size(struct console *c, int *cols, int *rows)
+{
+	struct console *p = ((struct bgcon *)c->priv)->parent;
+	p->size(p, cols, rows);
+}
+
 static void start_task(void *arg)
 {
 	char *line = arg;
 	shell_task(line);
+	struct task *t = task_current();
+	struct bgcon *bg = t->con->priv;
+	t->con = bg->parent;	/* task_exit lets go of the real one */
+	kfree(bg);
 }
 
 static int cmd_start(struct cmd *c)
@@ -1807,11 +1933,65 @@ static int cmd_start(struct cmd *c)
 		if (i + 1 < c->argc)
 			strcat0(line, " ", sizeof line);
 	}
-	struct task *t = task_spawn(c->argv[1], start_task, kstrdup(line), NULL);
-	if (!t)
+	struct console *parent = task_current()->con;
+	struct bgcon *bg = kzalloc(sizeof *bg);
+	if (!bg)
 		return fail(c, NULL, E_NOMEM);
+	bg->parent = parent;
+	bg->con = (struct console){ parent->name, bg_write, bg_getkey, bg_clear, bg_cursor, bg_size,
+	    NULL, NULL, bg, 1, NULL };
+	parent->refs++;		/* held for the task, handed back when it ends */
+	struct task *t = task_spawn(c->argv[1], start_task, kstrdup(line), &bg->con);
+	if (!t) {
+		parent->refs--;
+		kfree(bg);
+		return fail(c, NULL, E_NOMEM);
+	}
 	kprintf("Started task %d\n", t->id);
 	return 0;
+}
+
+/*
+ * CPU [\\HOST] [command]: Plan 9's cpu. A shell on the big machine, or one
+ * command run there, with this directory as its T: drive (and its current
+ * directory, for a single command).
+ */
+static int cmd_cpu(struct cmd *c)
+{
+	extern int remote_run(const char *host, const char *cmd);
+	const char *host = NULL;
+	int first = 0;
+	if (c->argc > 1 && c->argv[1][0] == '\\' && c->argv[1][1] == '\\') {
+		host = c->argv[1];
+		first = 2;
+	} else {
+		host = setting("net.cpu");
+		first = 1;
+		if (!*host) {
+			kprintf("CPU \\\\HOST [command]   a shell or a command on another machine\n"
+			    "CONTROL net.cpu=\\\\HOST    the machine CPU uses when you don't say\n");
+			return 1;
+		}
+	}
+	char line[200] = "";
+	for (int i = first; i < c->argc; i++) {
+		if (i > first)
+			strcat0(line, " ", sizeof line);
+		strcat0(line, c->argv[i], sizeof line);
+	}
+	return remote_run(host, line[0] ? line : NULL);
+}
+
+static int cmd_resume(struct cmd *c)
+{
+	const char *a = arg(c, 0);
+	if (!a) {
+		/* what's there to resume */
+		kprintf("Saved DOS programs (Ctrl+Alt+F11 saves one while it runs):\n");
+		return shell_exec("dir /b C:\\BDOS\\STATES\\*.BST");
+	}
+	extern int com_resume(const char *name);
+	return com_resume(a);
 }
 
 static int cmd_ctty(struct cmd *c)
@@ -2020,8 +2200,21 @@ static int cmd_ping(struct cmd *c)
 {
 	const char *host = arg(c, 0);
 	uint32_t dst;
-	if (!host || ip_parse(host, &dst)) {
-		kprintf("Usage: PING a.b.c.d   (there's no DNS yet)\n");
+	if (!host) {
+		kprintf("Usage: PING host   (a name, or an address like 10.0.2.2)\n");
+		return 1;
+	}
+	/* digits and dots that are not four numbers: a typo, not a name */
+	const char *h = host;
+	while ((*h >= '0' && *h <= '9') || *h == '.')
+		h++;
+	if (!*h && ip_parse(host, &dst) < 0) {
+		kprintf("Usage: PING host   (a name, or an address like 10.0.2.2)\n");
+		return 1;
+	}
+	int de = dns_resolve(host, &dst);
+	if (de) {
+		kprintf("%s: %s\n", host, vfs_strerror(de));
 		return 1;
 	}
 	struct ip_info in;
@@ -2047,6 +2240,85 @@ static int cmd_ping(struct cmd *c)
 	}
 	kprintf("%d of 4 answered.\n", ok);
 	return ok ? 0 : 1;
+}
+
+/* TELNET host [port] */
+static int cmd_telnet(struct cmd *c)
+{
+	extern int telnet_run(const char *host, int port);
+	const char *host = arg(c, 0), *port = arg(c, 1);
+	if (!host) {
+		kprintf("Usage: TELNET host [port]   (Ctrl+] hangs up)\n");
+		return 1;
+	}
+	return telnet_run(host, port ? (int)strtol(port, NULL, 10) : 23);
+}
+
+/* FETCH url [file] */
+static int cmd_fetch(struct cmd *c)
+{
+	extern int fetch_run(const char *url, const char *out, int quiet);
+	const char *url = arg(c, 0), *out = arg(c, 1);
+	if (!url) {
+		kprintf("Usage: FETCH http://host/path [file]   (no file: to the screen)\n");
+		return 1;
+	}
+	return fetch_run(url, out, 0);
+}
+
+static int cmd_nslookup(struct cmd *c)
+{
+	extern int nslookup_run(const char *name);
+	if (!arg(c, 0)) {
+		kprintf("Usage: NSLOOKUP name\n");
+		return 1;
+	}
+	return nslookup_run(arg(c, 0));
+}
+
+static int cmd_netstat(struct cmd *c)
+{
+	extern int netstat_run(void);
+	(void)c;
+	return netstat_run();
+}
+
+/* PLAY file.wav */
+static int cmd_play(struct cmd *c)
+{
+	extern int audio_play_file(const char *path, int quiet);
+	const char *f = arg(c, 0);
+	char abs[VFS_PATH_MAX];
+	if (!f) {
+		kprintf("Usage: PLAY file.wav   (Ctrl+C stops)\n");
+		return 1;
+	}
+	if (resolve_path(f, abs, sizeof abs)) {
+		kprintf("Invalid path\n");
+		return 1;
+	}
+	int e = audio_play_file(abs, 0);
+	if (e)
+		kprintf("%s: %s\n", f, e == E_INVAL ? "not a WAV file" : e == E_NOTSUP ? "a kind of WAV I can't play (PCM only)" : vfs_strerror(e));
+	return e ? 1 : 0;
+}
+
+static int cmd_usb(struct cmd *c)
+{
+	extern void usb_list(void);
+	(void)c;
+	usb_list();
+	return 0;
+}
+
+/* SOUND: what plays it */
+static int cmd_sound(struct cmd *c)
+{
+	extern const char *audio_device(void);
+	extern int audio_streams(void);
+	(void)c;
+	kprintf("Sound device: %s\nStreams playing: %d\n", audio_device(), audio_streams());
+	return 0;
 }
 
 /* --- command tables --- */
@@ -2082,6 +2354,9 @@ static const struct command commands[] = {
 	{ "DELTREE", cmd_deltree, "Delete a directory and everything in it" },
 	{ "DIR",     cmd_dir,     "List files (/W wide /A all /B bare /S subdirs /P pause)" },
 	{ "DRIVES",  cmd_drives,  "List drives" },
+	{ "FDISK",   cmd_fdisk,   "List disks; FDISK n /GPT gives disk n an EFI partition and bdosfs" },
+	{ "FORMAT",  cmd_format,  "FORMAT n: format the bdosfs partition on disk n" },
+	{ "INSTALL", cmd_install, "Put bdos on a disk: INSTALL n, or the Install bdos window" },
 	{ "ECHO",    cmd_echo,    "Display text, or turn command echo ON/OFF" },
 	{ "EDIT",    cmd_edit,    "Full-screen text editor" },
 	{ "ERASE",   cmd_del,     NULL },
@@ -2102,10 +2377,19 @@ static const struct command commands[] = {
 	{ "IPCONFIG", cmd_ipconfig, "TCP/IP address (IPCONFIG /RENEW, /RELEASE)" },
 	{ "NET",     cmd_net,     "Networking: NET VIEW, NET USE" },
 	{ "PING",    cmd_ping,    "Check another machine answers: PING 10.0.2.2" },
+	{ "PLAY",    cmd_play,    "Play a .WAV sound: PLAY \\BDOS\\SOUNDS\\CHIMES.WAV" },
+	{ "SOUND",   cmd_sound,   "Show the sound device" },
+	{ "USB",     cmd_usb,     "Show USB keyboards, mice and tablets" },
+	{ "TELNET",  cmd_telnet,  "Log in to another machine: TELNET host [port]" },
+	{ "FETCH",   cmd_fetch,   "Download a web page: FETCH http://host/path [file]" },
+	{ "NSLOOKUP", cmd_nslookup, "Look up a name in DNS" },
+	{ "NTP",     cmd_ntp,     "Set the clock from a time server: NTP pool.ntp.org, NTP SYNC, NTP OFF" },
+	{ "NETSTAT", cmd_netstat, "Show TCP connections" },
 	{ "PATH",    cmd_path,    "Show or set where programs are found" },
 	{ "PAUSE",   cmd_pause,   "Wait for a key" },
 	{ "PROMPT",  cmd_prompt,  "Set the prompt ($P path $G > $D date $T time)" },
 	{ "RD",      cmd_rd,      "Remove an empty directory" },
+	{ "SUBST",   cmd_subst,   "Make a folder a drive: SUBST A: T:\\LEMMINGS" },
 	{ "REBOOT",  cmd_reboot,  "Restart the computer" },
 	{ "REM",     cmd_rem,     "Comment" },
 	{ "REN",     cmd_ren,     "Rename a file" },
@@ -2116,6 +2400,8 @@ static const struct command commands[] = {
 	{ "SORT",    cmd_sort,    "Sort lines (/R reverse)" },
 	{ "START",   cmd_start,   "Run a command as a separate task" },
 	{ "TASKS",   cmd_tasks,   "List running tasks" },
+	{ "RESUME",  cmd_resume,  "Carry on a DOS program from its saved state" },
+	{ "CPU",     cmd_cpu,     "A shell or a command on a CPU server (CPU \\\\HOST [cmd])" },
 	{ "TIME",    cmd_time,    "Show or set the time: TIME 19:05 or TIME 7:05 pm (/T only shows)" },
 	{ "TOUCH",   cmd_touch,   "Create a file or update its time" },
 	{ "TREE",    cmd_tree,    "Show the directory tree (/F with files)" },
@@ -2296,6 +2582,19 @@ static int run_program(struct shell *sh, const char *path, int argc, char **argv
 	if (ext && !strcasecmp(ext, ".BAS"))
 		return basic_run_file(path, argc, argv);
 	if (ext && (!strcasecmp(ext, ".COM") || !strcasecmp(ext, ".EXE"))) {
+		/* an .EXE is a DOS program (MZ) or a native one (ELF): the file says which */
+		uint8_t magic[64];
+		int e = 0;
+		long got = 0;
+		struct vfile *f = vfs_open(path, O_READ, &e);
+		if (f) {
+			got = vfs_read(f, magic, sizeof magic);
+			vfs_close(f);
+		}
+		extern int elf_is_native(const void *img, size_t n);
+		extern int proc_run(const char *path, int argc, char **argv);
+		if (got > 0 && elf_is_native(magic, (size_t)got))
+			return proc_run(path, argc, argv);
 		extern int com_run(const char *path, int argc, char **argv);
 		return com_run(path, argc, argv);
 	}
@@ -3084,7 +3383,7 @@ void shell_task(void *arg)
 		return;
 	t->user = sh;
 	if (!getvar(sh, "PATH"))
-		setvar(sh, "PATH", "C:\\BDOS");
+		setvar(sh, "PATH", "C:\\BDOS;C:\\BIN");
 	if (!getvar(sh, "COMSPEC"))
 		setvar(sh, "COMSPEC", "C:\\COMMAND");
 

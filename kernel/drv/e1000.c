@@ -125,7 +125,7 @@ void e1000_init(void)
 	struct e1000 *e = kzalloc(sizeof *e);
 	if (!e)
 		return;
-	e->regs = (volatile uint32_t *)pci_bar_mem(pd, 0);
+	e->regs = (volatile uint32_t *)pci_map_bar(pd, 0, 0x20000);
 
 	wr(e, IMC, 0xFFFFFFFF);		/* no interrupts: we poll */
 	wr(e, CTRL, rd(e, CTRL) | (1u << 26));	/* reset */

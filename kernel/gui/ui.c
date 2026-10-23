@@ -29,7 +29,9 @@ static int label_len(const char *l, const char *end)
 void text_mnemonic(struct surface *s, int x, int y, const char *l, uint32_t ink)
 {
 	for (; *l && *l != '\t'; l++) {
-		if (*l == '&' && l[1] && l[1] != '\t') {
+		if (*l == '&' && l[1] == '&') {
+			l++;		/* && is a plain & */
+		} else if (*l == '&' && l[1] && l[1] != '\t') {
 			l++;
 			hline(s, x, y + FONT_H - 2, FONT_W, ink);
 		}
@@ -41,8 +43,13 @@ void text_mnemonic(struct surface *s, int x, int y, const char *l, uint32_t ink)
 
 static int mnemonic(const char *l)
 {
-	const char *a = strchr(l, '&');
-	return a && a[1] ? toupper((unsigned char)a[1]) : 0;
+	for (const char *a = strchr(l, '&'); a; a = strchr(a + 2, '&')) {
+		if (a[1] != '&')
+			return a[1] ? toupper((unsigned char)a[1]) : 0;
+		if (!a[2])
+			break;
+	}
+	return 0;
 }
 
 static int item_h(const struct menu_item *it)
@@ -187,11 +194,38 @@ int popup_mouse(struct wm *wm, int type, int x, int y)
 	return 1;
 }
 
+void popup_select_first(struct wm *wm)
+{
+	struct popup *p = wm->popup;
+	if (!p || p->sel >= 0)
+		return;
+	for (int i = 0; i < p->n; i++)
+		if (!(p->items[i].flags & (MI_SEP | MI_DISABLED))) {
+			p->sel = i;
+			wm_dirty(wm, p->r);
+			return;
+		}
+}
+
 int popup_key(struct wm *wm, int k)
 {
 	struct popup *p = wm->popup;
 	if (k == 27) {
 		popup_close(wm);
+		return 1;
+	}
+	/* left and right: the next menu along the window's menu bar */
+	struct win *ow = p->owner;
+	if ((k == KEY_LEFT || k == KEY_RIGHT) && ow && ow->menubar && ow->menubar->open >= 0 && ow->ops &&
+	    ow->ops->mouse) {
+		struct menubar *mb = ow->menubar;
+		int i = (mb->open + (k == KEY_RIGHT ? 1 : -1) + mb->n) % mb->n;
+		int x = 6;
+		for (int j = 0; j < i; j++)
+			x += (int)strlen(mb->titles[j]) * FONT_W + 12;
+		popup_close(wm);
+		ow->ops->mouse(ow, EV_DOWN, x + 3, 3, 1, 0);
+		popup_select_first(wm);
 		return 1;
 	}
 	if (k == KEY_UP || k == KEY_DOWN) {

@@ -16,8 +16,11 @@ Changes take effect straight away and are saved.
 
 The applets
 -----------
-Date/Time   the clock, the calendar, 24-hour or am/pm
-Network     this computer's name; browse the LAN and open a shell or a
+Date/Time   the clock, the calendar, 24-hour or am/pm; the time zone,
+            daylight saving, and setting the clock from the internet
+Network     this computer's name; its address (DHCP or fixed: address,
+            mask, gateway, DNS); whether bterm and telnet may connect,
+            and bterm's password; browse the LAN and open a shell or a
             desktop on another machine (T: is your folder there)
 Desktop     background colour; follow the time of day (Play a Day shows
             it off); whether WIN starts at boot (it edits the WIN line in
@@ -27,9 +30,19 @@ Themes      window colours, desktop colour and pattern together - try
             key=value text; Save As makes one from what's on screen
 Mouse       pointer speed, double-click speed, swap buttons
 Keyboard    key repeat delay and rate
+DOS         how fast DOS programs run; how a DOS screen fits a bigger
+            window (dos.scale: sharp, smooth or stretch); crash listings
 System      version, processor, memory, display, network, drives
 
 CONTROL DATE, CONTROL MOUSE and so on open one applet directly.
+
+The clock from the internet
+---------------------------
+CONTROL clock.tz=-6          hours from UTC (-6 Chicago, +5:30 India)
+CONTROL clock.dst=us         daylight saving: us, eu or none
+CONTROL net.ntp=pool.ntp.org the time server (empty: don't)
+NTP                          set the clock now, and say how far off it was
+bdos sets the clock at boot, when these change, and every six hours.
 
 The clock from the prompt
 -------------------------
@@ -53,12 +66,63 @@ Program Manager's groups are the folders in C:\PROGMAN, and its icons are
 the files in them. A .LNK file's first line is the command it runs; any
 other file opens the way File Manager would open it. So you can manage
 groups from File Manager or the prompt too: MD C:\PROGMAN\TOOLS makes a
-group.
+group. Lines after the command, all optional (Properties sets them):
+
+  dir=C:\GAMES\KEEN   start there
+  run=minimized       start as an icon
+  speed=386           a DOS program's pace (xt, at, 386, 486, pentium, max)
+
+Everything in C:\PROGMAN\Startup starts with the desktop. Options has
+Auto Arrange (pm.autoarrange), Minimize on Use (pm.minonuse) and Save
+Settings on Exit (pm.savesettings).
 
 File Manager keys: Enter opens, Backspace goes up, Del deletes, F2
 renames, F5 refreshes, F7 moves, F8 copies, Ctrl+N makes a folder, Ctrl+A
-selects everything, Tab switches between the tree and the list. Drag files
-to move them (Ctrl copies; dragging to another drive always copies).
+selects everything, Tab switches between the tree and the list.
+
+Selecting: click a file; Ctrl+click adds or removes one; Shift+click (or
+Shift+arrows) takes everything in between; drag a box from an empty part
+of the list to take everything it touches (Ctrl+drag adds to what's
+selected). Space toggles the file under the cursor.
+
+Cut, Copy and Paste: Ctrl+X or Ctrl+C puts the selection on a clipboard
+every File Manager window shares (cut files go grey), and Ctrl+V in any
+folder copies or moves them there. Pasting a copy into the folder it came
+from makes "NAME (2)". The Edit menu and right-click menus have the same,
+plus Paste Into Folder on a folder.
+
+Drag files to move them (Ctrl copies; dragging to another drive always
+copies).
+
+DOS installers that want a floppy
+---------------------------------
+SUBST A: T:\LEMMINGS   A: is now that folder; A: then INSTALL
+SUBST                  shows what's substituted
+SUBST A: /D            undoes it
+
+When a DOS program misbehaves
+-----------------------------
+CONTROL dos.trace=1    a crash also lists the last 64 instructions, the
+                       code around the crash and the registers; and
+                       Ctrl+Alt+F10 while a program runs shows the VGA,
+                       the PIC, the keyboard controller and the mouse.
+                       (Programs run a little slower while it's on.)
+CONTROL dos.trace=2    just Ctrl+Alt+F10, at full speed
+CONTROL dos.trace=0    off again
+
+On a host too slow for a program's pace (CONTROL dos.speed), its clock
+slows down with it: a game runs in slow motion rather than missing keys.
+QEMU's KVM (Linux) or HVF (Intel Macs) make DOS programs run many times
+faster than QEMU's own CPU emulation; run.sh uses them when it can.
+
+Shell windows
+-------------
+They keep 500 lines of what scrolled away: the wheel or Shift+PgUp/PgDn
+looks back, Ctrl+Shift+Home/End jumps to either end, typing comes back.
+Drag to select, double-click for a word; Ctrl+Insert (or Ctrl+Shift+C)
+copies, Shift+Insert (or Ctrl+Shift+V, or the middle button) pastes.
+Right-click for the same. The clipboard is the CLIP$ device too:
+TYPE CLIP$ shows it, DIR > CLIP$ fills it.
 
 The network
 -----------
@@ -69,6 +133,19 @@ CONTROL net.ip=192.168.1.50   a fixed address (and net.mask, net.gateway)
 CONTROL net.ip=dhcp           back to DHCP
 CONTROL net.password=secret   bterm must give this password
 CONTROL net.udp=0             no bterm or routed BDNET at all
+CONTROL net.dns=1.1.1.1       the name server (fixed addresses)
 
 bterm (on Linux or a Mac) shows this machine's desktop in a window, or a
 shell with -t. The folder it was started from is T: here.
+
+Disks and installing
+--------------------
+FDISK                list the disks and their partitions
+FDISK 1 /GPT         wipe disk 1: an EFI partition and bdosfs on the rest
+FORMAT 1             format disk 1's bdosfs partition
+INSTALL              on the desktop: the Install bdos window
+INSTALL 1            put bdos on disk 1 (it asks; /Y doesn't)
+INSTALL 1 /UPGRADE   renew bdos there, keeping files and settings
+
+bdos.iso boots a live system from a RAM disk (C:), with Install bdos in
+Program Manager. Disks found: SATA (AHCI), IDE, NVMe, VirtIO and VirtIO SCSI.

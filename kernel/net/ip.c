@@ -18,6 +18,7 @@
 #define ET_IP		0x0800
 #define ET_ARP		0x0806
 #define P_ICMP		1
+#define P_TCP		6
 #define P_UDP		17
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
@@ -212,6 +213,63 @@ static int udp_send(uint32_t dst, uint16_t sport, uint16_t dport, const void *da
 	wr16(u + 6, 0);		/* no checksum: allowed for IPv4 */
 	memcpy(u + 8, data, len);
 	return ip_send(dst, P_UDP, u, 8 + len);
+}
+
+/* ---- for TCP and the resolver (tcp.c) ------------------------------------------------------ */
+
+int ip_output(uint32_t dst, int proto, const void *payload, size_t len)
+{
+	return ip_send(dst, proto, payload, len);
+}
+
+uint32_t ip_local(void) { return my_ip; }
+uint32_t ip_dns(void)
+{
+	uint32_t v;
+	return ip_parse(setting("net.dns"), &v) ? my_dns : v;	/* the setting wins, even over DHCP */
+}
+
+/* the checksum with the pseudo header TCP and UDP use */
+uint16_t ip_csum_pseudo(uint32_t src, uint32_t dst, int proto, const uint8_t *p, size_t n)
+{
+	uint32_t s = (src >> 16) + (src & 0xFFFF) + (dst >> 16) + (dst & 0xFFFF) + (uint32_t)proto + (uint32_t)n;
+	for (size_t i = 0; i + 1 < n; i += 2)
+		s += (uint32_t)(p[i] << 8 | p[i + 1]);
+	if (n & 1)
+		s += (uint32_t)p[n - 1] << 8;
+	while (s >> 16)
+		s = (s & 0xFFFF) + (s >> 16);
+	return (uint16_t)~s;
+}
+
+static struct ubind {
+	uint16_t port;
+	udp_fn fn;
+	void *arg;
+} ubinds[8];
+
+int udp_bind(uint16_t port, udp_fn fn, void *arg)
+{
+	for (int i = 0; i < 8; i++)
+		if (!ubinds[i].port) {
+			ubinds[i].port = port;
+			ubinds[i].fn = fn;
+			ubinds[i].arg = arg;
+			return 0;
+		}
+	return -1;
+}
+
+void udp_unbind(uint16_t port)
+{
+	for (int i = 0; i < 8; i++)
+		if (ubinds[i].port == port)
+			ubinds[i].port = 0;
+}
+
+int ip_udp_send(uint32_t dst, uint16_t sport, uint16_t dport, const void *data, size_t len)
+{
+	return udp_send(dst, sport, dport, data, len);
 }
 
 /* ---- ping ------------------------------------------------------------------------------- */
@@ -505,6 +563,14 @@ int ip_input(const uint8_t *f, int len)
 			dhcp_input(p + 8, ul - 8);
 		else if (dport == bdnet_port && my_ip)
 			bdnet_udp_input(src, sport, p + 8, ul - 8);
+		else
+			for (int i = 0; i < 8; i++)
+				if (ubinds[i].port && ubinds[i].port == dport) {
+					ubinds[i].fn(src, sport, p + 8, ul - 8, ubinds[i].arg);
+					break;
+				}
+	} else if (ip[9] == P_TCP && my_ip && dst == my_ip) {
+		tcp_input(src, dst, p, pl);
 	}
 	return 1;
 }
@@ -513,6 +579,7 @@ int ip_input(const uint8_t *f, int len)
 
 void ip_timers(void)
 {
+	tcp_timers();
 	if (!nif || !use_dhcp)
 		return;
 	uint64_t now = uptime_ms();
@@ -576,7 +643,7 @@ void ip_get(struct ip_info *info)
 	info->ip = my_ip;
 	info->mask = my_mask;
 	info->gw = my_gw;
-	info->dns = my_dns;
+	info->dns = ip_dns();
 	info->server = dhcp_server;
 	info->dhcp = use_dhcp;
 	info->bound = use_dhcp ? dhcp_state == D_BOUND : my_ip != 0;

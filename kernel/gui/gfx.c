@@ -215,6 +215,11 @@ static const struct icon icons[] = {
 		"kkgkkkkkkkkkkkkk", "kkkgkkkkkkkkkkkk", "kkkkgkkkkkkkkkkk", "kkkgkkkkkkkkkkkk",
 		"kkgkkgggggkkkkkk", "kkkkkkkkkkkkkkkk", "kkkkkkkkkkkkkkkk", "kkkkkkkkkkkkkkkk",
 		"kkkkkkkkkkkkkkkk", "kkkkkkkkkkkkkkkk", "kddddddddddddddk", "kkkkkkkkkkkkkkkk" } },
+	{ "disk", {
+		"................", "................", "..kkkkkkkkkkkk..", ".kggggggggggggk.",
+		".kgwwwwwwwwwwgk.", ".kgwddddddddwgk.", ".kgwwwwwwwwwwgk.", ".kggggggggggggk.",
+		".kggggggggggggk.", ".kkkkkkkkkkkkkk.", ".kddddddddddddk.", ".kddddddddeedek.",
+		".kddddddddddddk.", ".kkkkkkkkkkkkkk.", "................", "................" } },
 	{ "folder", {
 		"................", "................", ".kkkkk..........", "kyyyyyk.........",
 		"kyyyyyykkkkkkkk.", "kyyyyyyyyyyyyyyk", "kokkkkkkkkkkkkkk", "kyyyyyyyyyyyyyyk",
@@ -230,6 +235,11 @@ static const struct icon icons[] = {
 		"..kwwwwwwwwwwk..", "..kwwwbbbbwwwk..", "..kwwbbwwbbwwk..", "..kwbbwwwwwwwk..",
 		"..kwbbwwwwwwwk..", "..kwbbwwwwwwwk..", "..kwwbbwwbbwwk..", "..kwwwbbbbwwwk..",
 		"..kwwwwwwwwwwk..", "..kwwwwwwwwwwk..", "..kkkkkkkkkkkk..", "................" } },
+	{ "pulse", {
+		"kkkkkkkkkkkkkkkk", "kddddddddddddddk", "kkkkkkkkkkkkkkkk", "kkkkkkkkkkkkrrkk",
+		"kkkkkkkkkkkkrrkk", "kkkkkkkkyykkyykk", "kkkkkkkkyykkyykk", "kkkkeekkeekkeekk",
+		"kkkkeekkeekkeekk", "kkkkeekkeekkeekk", "kkeekkeekkeekkkk", "kkeekkeekkeekeek",
+		"kkeekkeekkeekeek", "kkeekkeekkeekeek", "kddddddddddddddk", "kkkkkkkkkkkkkkkk" } },
 	{ "edit", {
 		"..kkkkkkkkkk....", "..kwwwwwwwwk....", "..kwddddddwk....", "..kwwwwwwwwk..k.",
 		"..kwddddddwk.kyk", "..kwwwwwwwwkkyyk", "..kwddddddwkyyk.", "..kwwwwwwwkyyk..",
@@ -309,6 +319,46 @@ static const struct icon icons[] = {
 		".kwwrrwwwbbwwwk.", "kwwwwwwwwwwwwwk.", "kweewwwwwwwyywk.", "kweewwwkkwwyywk.",
 		"kwwwwwkwwkwwwwk.", "kwwwwwkwwkwwwk..", ".kwwwwwkkwwwk...", ".kwccwwwwwwk....",
 		"..kwccwwwwk.....", "...kkkkkkk......", "................", "................" } },
+	{ "eyes", {
+		"................", "................", "..kkkk....kkkk..", ".kwwwwk..kwwwwk.",
+		"kwwwwwwkkwwwwwwk", "kwwwwwwkkwwwwwwk", "kwwwkkwkkwwwkkwk", "kwwwkkwkkwwwkkwk",
+		"kwwwwwwkkwwwwwwk", "kwwwwwwkkwwwwwwk", ".kwwwwk..kwwwwk.", "..kkkk....kkkk..",
+		"................", "................", "................", "................" } },
+	{ "cat", {
+		"................", "..k.......k.....", "..kk.....kk.....", "..kwk...kwk.....",
+		"..kwwkkkwwk.....", "..kwwwwwwwk.....", ".kwwkwwwkwwk....", ".kwwwwrwwwwk....",
+		".kwwwkkkwwwk....", "..kwwwwwwwk.....", "...kwwwwwk...k..", "..kwwwwwwwk..kk.",
+		"..kwwwwwwwwk.kwk", "..kwwkwwkwwwkwwk", "..kkkkkkkkkkkkk.", "................" } },
+	{ "mine", {
+		"................", ".......k........", "...k...k...k....", "....kkkkkkk.....",
+		"...kkwwkkkkk....", "...kwwkkkkkk....", ".kkkkkkkkkkkkk..", "...kkkkkkkkk....",
+		"...kkkkkkkkk....", "....kkkkkkk.....", "...k...k...k....", ".......k........",
+		"................", "..ggggggggggggg.", "..gdddddddddddg.", "..ggggggggggggg." } },
+	{ "calc", {
+		"..kkkkkkkkkkkk..", "..kggggggggggk..", "..kgkkkkkkkkgk..", "..kgkeeeeeekgk..",
+		"..kgkkkkkkkkgk..", "..kggggggggggk..", "..kgwwgwwgrrgk..", "..kgwwgwwgrrgk..",
+		"..kggggggggggk..", "..kgwwgwwgwwgk..", "..kgwwgwwgwwgk..", "..kggggggggggk..",
+		"..kgwwgwwgwwgk..", "..kgwwgwwgwwgk..", "..kggggggggggk..", "..kkkkkkkkkkkk.." } },
+	{ "charmap", {
+		"kkkkkkkkkkkkkkkk", "kwwwkwwwkwwwkwwk", "kwkwkwkwkkwkkwwk", "kwkwkwkkkwwwkwwk",
+		"kkkkkkkkkkkkkkkk", "kwwwkwwwkwwwkwwk", "kwkkkwwwkkkwkwwk", "kwwwkwkwkwwwkwwk",
+		"kkkkkkkkkkkkkkkk", "kwwwkwwwkwwwkwwk", "kwkwkkwkkwkwkwwk", "kwwwkwwwkwwwkwwk",
+		"kkkkkkkkkkkkkkkk", "................", "................", "................" } },
+	{ "tasks", {
+		"kkkkkkkkkkkkkkkk", "knnnnnnnnnnnnnnk", "kwwwwwwwwwwwwwwk", "kwkkkkkkkkkkkwwk",
+		"kwwwwwwwwwwwwwwk", "kbbbbbbbbbbbbbbk", "kwwwwwwwwwwwwwwk", "kwkkkkkkkkwwwwwk",
+		"kwwwwwwwwwwwwwwk", "kwkkkkkkkkkkwwwk", "kwwwwwwwwwwwwwwk", "kggggggggggggggk",
+		"kgkkkkgggkkkkkgk", "kggggggggggggggk", "kkkkkkkkkkkkkkkk", "................" } },
+	{ "phone", {
+		"................", "................", "..kkkkkkkkkkkk..", ".kddddddddddddk.",
+		"kdddkkkkkkkkdddk", "kddk........kddk", ".kk..kkkkkk..kk.", "....kddddddk....",
+		"...kddkddkddk...", "..kddddddddddk..", "..kddkddkddkdk..", "..kddddddddddk..",
+		"..kddkddkddkdk..", "..kddddddddddk..", "..kkkkkkkkkkkk..", "................" } },
+	{ "help", {
+		"................", ".....kkkkkk.....", "...kkyyyyyykk...", "..kyyykkkkyyyk..",
+		"..kyyk....kyyk..", "..kkkk....kyyk..", "..........kyyk..", "........kkyyk...",
+		"......kkyyk.....", "......kyyk......", "......kyyk......", "......kkkk......",
+		"................", "......kkkk......", "......kyyk......", "......kkkk......" } },
 	{ "desktop", {
 		".kkkkkkkkkkkkkk.", ".kggggggggggggk.", ".kgkkkkkkkkkkgk.", ".kgkttttttttkgk.",
 		".kgktnnnntttkgk.", ".kgktwwwwtttkgk.", ".kgktwwwwtttkgk.", ".kgkttttttttkgk.",

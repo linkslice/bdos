@@ -67,7 +67,7 @@ STUB_ERR   29
 STUB_ERR   30
 STUB_NOERR 31
 /* hardware IRQs 0-15 remapped to vectors 32-47, plus the spurious vector */
-.irp n, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,255
+.irp n, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,240,241,242,255
 STUB_NOERR \n
 .endr
 
@@ -124,8 +124,10 @@ arch_switch:
 	pushq	%r14
 	pushq	%r15
 	pushfq
+	fxsave	16(%rdi)
 	movq	%rsp, (%rdi)
 	movq	(%rsi), %rsp
+	fxrstor	16(%rsi)
 	popfq
 	popq	%r15
 	popq	%r14
@@ -138,8 +140,7 @@ arch_switch:
 /* First return of a new task lands here with the entry point in %r12. */
 	.globl arch_task_trampoline
 arch_task_trampoline:
-	sti
-	call	*%r12
+	call	*%r12			/* task_start: interrupts on when it's ready */
 	call	task_exit		/* never returns */
 1:	hlt
 	jmp	1b
@@ -153,6 +154,9 @@ isr_table:
 	.globl isr_spurious
 isr_spurious:
 	.quad isr255
+	.globl isr_lapic
+isr_lapic:
+	.quad isr240, isr241, isr242
 
 /*
  * int arch_setjmp(struct arch_jmpbuf *); void arch_longjmp(struct arch_jmpbuf *, int)
@@ -188,3 +192,51 @@ arch_longjmp:
 	movq	40(%rdi), %r15
 	movq	48(%rdi), %rsp
 	jmpq	*56(%rdi)
+
+/*
+ * SYSCALL from a native program: RCX = its RIP, R11 = its RFLAGS, RSP still
+ * its stack. Switch to the task's kernel stack (kept in the core's struct
+ * cpu), save a struct sysframe, and call syscall_dispatch(frame).
+ */
+	.text
+	.globl syscall_entry
+syscall_entry:
+	movq	%rsp, %gs:16
+	movq	%gs:8, %rsp
+	pushq	%gs:16			/* rsp */
+	pushq	%r11			/* rflags */
+	pushq	%rcx			/* rip */
+	pushq	%rax
+	pushq	%rdi
+	pushq	%rsi
+	pushq	%rdx
+	pushq	%r10
+	pushq	%r8
+	pushq	%r9
+	pushq	%rbx
+	pushq	%rbp
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+	movq	%rsp, %rdi
+	sti
+	call	syscall_dispatch
+	cli
+	popq	%r15
+	popq	%r14
+	popq	%r13
+	popq	%r12
+	popq	%rbp
+	popq	%rbx
+	popq	%r9
+	popq	%r8
+	popq	%r10
+	popq	%rdx
+	popq	%rsi
+	popq	%rdi
+	popq	%rax
+	popq	%rcx
+	popq	%r11
+	popq	%rsp
+	sysretq

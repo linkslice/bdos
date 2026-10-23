@@ -28,6 +28,8 @@ struct pitem {
 	char label[48];
 	char icon[16];
 	char cmd[200];
+	char dir[200], speed[12];	/* .lnk: where it starts, DOS pace */
+	int minimized;			/* .lnk: run minimized */
 	int is_lnk, is_dir, order;
 };
 
@@ -81,6 +83,18 @@ static const char *guess_icon(const char *cmd)
 		return "control";
 	if (!strcasecmp(cmd, "@clock"))
 		return "clock";
+	if (!strcasecmp(cmd, "@pulse"))
+		return "pulse";
+	if (!strcasecmp(cmd, "@install"))
+		return "disk";
+	static const struct { const char *cmd, *icon; } apps[] = {
+		{ "@help", "help" }, { "@eyes", "eyes" }, { "@taskman", "tasks" }, { "@terminal", "phone" },
+		{ "@neko", "cat" }, { "@mines", "mine" }, { "@calc", "calc" }, { "@charmap", "charmap" },
+		{ "TELNET", "phone" },
+	};
+	for (size_t i = 0; i < NELEM(apps); i++)
+		if (!strncasecmp(cmd, apps[i].cmd, strlen(apps[i].cmd)))
+			return apps[i].icon;
 	if (dot && !strncasecmp(dot, ".BAS", 4))
 		return "basic";
 	if (dot && (!strcasecmp(dot, ".C") || !strcasecmp(dot, ".C\"")))
@@ -121,16 +135,12 @@ static int load_item(void *arg, struct vstat *st)
 		char *ld = strrchr(it->label, '.');
 		if (ld)
 			*ld = 0;
-		size_t len;
-		int err;
-		char *body = vfs_slurp(path, &len, &err);
-		if (body) {
-			char *e = body;
-			while (*e && *e != '\r' && *e != '\n')
-				e++;
-			*e = 0;
-			strncpy0(it->cmd, body, sizeof it->cmd);
-			kfree(body);
+		struct lnk l;
+		if (!lnk_read(path, &l)) {
+			strncpy0(it->cmd, l.cmd, sizeof it->cmd);
+			strncpy0(it->dir, l.dir, sizeof it->dir);
+			strncpy0(it->speed, l.speed, sizeof it->speed);
+			it->minimized = l.minimized;
 		}
 		strncpy0(it->icon, guess_icon(it->cmd), sizeof it->icon);
 		if (!it->cmd[0])
@@ -150,8 +160,12 @@ static void sort_items(struct pgroup *g)
 	for (int i = 1; i < g->nitems; i++) {
 		struct pitem k = g->items[i];
 		int j = i - 1;
-		while (j >= 0 && (g->items[j].order > k.order ||
-		    (g->items[j].order == k.order && strcasecmp(g->items[j].label, k.label) > 0))) {
+		int aa = setting_int("pm.autoarrange") != 0;	/* name order, the shell first */
+		int ko = aa ? (k.order == 0 ? 0 : 1) : k.order;
+		while (j >= 0) {
+			int jo = aa ? (g->items[j].order == 0 ? 0 : 1) : g->items[j].order;
+			if (!(jo > ko || (jo == ko && strcasecmp(g->items[j].label, k.label) > 0)))
+				break;
 			g->items[j + 1] = g->items[j];
 			j--;
 		}
@@ -187,6 +201,8 @@ static int scan_group(void *arg, struct vstat *st)
 
 static void save_layout(struct pgroup *g)
 {
+	if (!setting_int("pm.savesettings"))
+		return;
 	char v[48];
 	snprintf(v, sizeof v, "%d %d %d %d %d", g->maximized ? g->restore.x : g->r.x,
 	    g->maximized ? g->restore.y : g->r.y, g->maximized ? g->restore.w : g->r.w,
@@ -509,18 +525,18 @@ static void pm_render(struct win *w)
 	pm->mb.open = w->wm->popup && w->wm->popup->owner == w ? pm->mb.open : -1;
 	menubar_draw(s, &pm->mb, s->w);
 	surf_clip(s, ws);
-	for (int i = 0; i < pm->n; i++) {
-		int gi = pm->z[i];
-		if (!pm->g[gi].minimized)
-			draw_group(pm, s, gi);
-	}
-	/* minimized groups: icons along the bottom of the workspace */
+	/* minimized groups: icons along the bottom of the workspace, under the groups */
 	for (int gi = 0; gi < pm->n; gi++) {
 		if (!pm->g[gi].minimized)
 			continue;
 		struct rect r = gicon(pm, gi);
 		draw_icon(s, r.x + (r.w - 32) / 2, r.y + 2, "group");
 		draw_label(s, r.x, r.y + 36, pm->g[gi].name, gi == active(pm));
+	}
+	for (int i = 0; i < pm->n; i++) {
+		int gi = pm->z[i];
+		if (!pm->g[gi].minimized)
+			draw_group(pm, s, gi);
 	}
 	surf_noclip(s);
 	if (pm->show_hs)
@@ -553,9 +569,11 @@ static void open_item(struct pm *pm, struct pgroup *g, int i)
 	char path[VFS_PATH_MAX];
 	item_path(g, i, path, sizeof path);
 	if (it->is_lnk)
-		launch_cmd(pm->w->wm, it->label, it->cmd);
+		launch_item(pm->w->wm, it->label, it->cmd, it->dir, it->minimized, it->speed);
 	else
 		launch_path(pm->w->wm, path);
+	if (setting_int("pm.minonuse") && pm->w->wm->progman == pm->w && !pm->w->minimized)
+		win_minimize(pm->w, 1);
 }
 
 void progman_reload(struct wm *wm)
@@ -587,7 +605,13 @@ struct props {
 	char file[VFS_NAME_MAX];	/* "" for a new item */
 	int is_lnk;
 	int desc, cmd, icon, preview, ro, hidden, ok, cancel;
+	int wdir, minimized, speed;
 };
+
+/* the paces a DOS program can be held to (dos.speed's words) */
+static const char *const pm_speed_names[] = { "Usual (Control Panel)", "XT (4.77 MHz)", "AT (286)", "386", "486",
+	"Pentium", "As fast as possible" };
+static const char *const pm_speed_keys[] = { "", "xt", "at", "386", "486", "pentium", "max" };
 
 static void props_preview(struct form *f, int id, struct surface *s, struct rect r)
 {
@@ -647,8 +671,14 @@ static void props_event(struct form *f, int id, int ev)
 		}
 	}
 	if (p->is_lnk) {
-		const char *cmd = form_text(f, p->cmd);
-		vfs_spew(newpath, cmd, strlen(cmd));
+		struct lnk l;
+		memset(&l, 0, sizeof l);
+		strncpy0(l.cmd, form_text(f, p->cmd), sizeof l.cmd);
+		strncpy0(l.dir, form_text(f, p->wdir), sizeof l.dir);
+		l.minimized = (int)form_val(f, p->minimized);
+		long sp = form_val(f, p->speed);
+		strncpy0(l.speed, pm_speed_keys[sp >= 0 && sp < (long)NELEM(pm_speed_keys) ? sp : 0], sizeof l.speed);
+		lnk_write(newpath, &l);
 		vfs_xattr_set(newpath, "icon", icon_names[form_val(f, p->icon)]);
 	} else {
 		struct vstat st;
@@ -676,7 +706,7 @@ static void open_props(struct wm *wm, struct pgroup *g, int i)
 	p->is_lnk = !it || it->is_lnk;
 	if (it)
 		strncpy0(p->file, it->file, sizeof p->file);
-	int cw = 440, ch = p->is_lnk ? 200 : 186;
+	int cw = 440, ch = p->is_lnk ? 310 : 186;
 	char title[64];
 	snprintf(title, sizeof title, it ? "Properties - %s" : "New Program Item", it ? it->label : "");
 	struct form *f = form_new(title, cw, ch, props_event, p);
@@ -689,15 +719,26 @@ static void open_props(struct wm *wm, struct pgroup *g, int i)
 		p->desc = form_add(f, FW_EDIT, 126, 14, cw - 140, 24, it ? it->label : "");
 		form_add(f, FW_LABEL, 14, 50, 0, 0, "Command line:");
 		p->cmd = form_add(f, FW_EDIT, 126, 46, cw - 140, 24, it ? it->cmd : "");
-		form_add(f, FW_LABEL, 14, 92, 0, 0, "Icon:");
-		p->icon = form_add(f, FW_CHOICE, 126, 88, 170, 24, NULL);
+		form_add(f, FW_LABEL, 14, 82, 0, 0, "Working dir:");
+		p->wdir = form_add(f, FW_EDIT, 126, 78, cw - 140, 24, it ? it->dir : "");
+		form_add(f, FW_LABEL, 14, 124, 0, 0, "Icon:");
+		p->icon = form_add(f, FW_CHOICE, 126, 120, 170, 24, NULL);
 		form_options(f, p->icon, icon_names, (int)NELEM(icon_names));
 		for (int k = 0; it && k < (int)NELEM(icon_names); k++)
 			if (!strcasecmp(icon_names[k], it->icon))
 				form_set_val(f, p->icon, k);
-		p->preview = form_add(f, FW_CUSTOM, 310, 80, 48, 44, NULL);
+		p->preview = form_add(f, FW_CUSTOM, 310, 110, 48, 44, NULL);
 		form_custom(f, p->preview, props_preview);
-		form_add(f, FW_LABEL, 14, 134, 0, 0, "Leave the command empty for a shell.");
+		form_add(f, FW_LABEL, 14, 164, 0, 0, "DOS speed:");
+		p->speed = form_add(f, FW_CHOICE, 126, 160, 220, 24, NULL);
+		form_options(f, p->speed, pm_speed_names, (int)NELEM(pm_speed_names));
+		for (int k = 1; it && k < (int)NELEM(pm_speed_keys); k++)
+			if (!strcasecmp(pm_speed_keys[k], it->speed))
+				form_set_val(f, p->speed, k);
+		p->minimized = form_add(f, FW_CHECK, 126, 196, 200, 22, "Run minimized");
+		form_set_val(f, p->minimized, it && it->minimized);
+		form_add(f, FW_LABEL, 14, 232, 0, 0, "Leave the command empty for a shell, and the");
+		form_add(f, FW_LABEL, 14, 248, 0, 0, "working directory empty to start where you are.");
 	} else {
 		char path[VFS_PATH_MAX], info[96], sz[32];
 		item_path(g, i, path, sizeof path);
@@ -841,8 +882,11 @@ enum {
 	PM_CONTROL, PM_THEMES, PM_DESKTOP, PM_DATE,
 	PM_CASCADE, PM_TILE, PM_ARRANGE, PM_CLOCK, PM_ABOUT, PM_KEYS,
 	PM_DEL_GROUP, PM_RESTORE_G, PM_MAX_G, PM_MIN_G,
+	PM_AUTOARRANGE, PM_MINONUSE, PM_SAVESETTINGS, PM_HELP,
 	PM_GROUP0 = 100,
 };
+
+static void pm_save_window(struct win *w);
 
 static void pm_pick(struct wm *wm, void *arg, int id)
 {
@@ -878,6 +922,20 @@ static void pm_pick(struct wm *wm, void *arg, int id)
 		}
 		break;
 	case PM_CLOCK: clock_open(wm); break;
+	case PM_AUTOARRANGE:
+		setting_set_int("pm.autoarrange", !setting_int("pm.autoarrange"));
+		pm_scan(pm);
+		break;
+	case PM_MINONUSE: setting_set_int("pm.minonuse", !setting_int("pm.minonuse")); break;
+	case PM_SAVESETTINGS:
+		setting_set_int("pm.savesettings", !setting_int("pm.savesettings"));
+		if (setting_int("pm.savesettings")) {	/* from now on: what's there now */
+			for (int i = 0; i < pm->n; i++)
+				save_layout(&pm->g[i]);
+			pm_save_window(w);
+		}
+		break;
+	case PM_HELP: launch_cmd(wm, "Help", "@help"); break;
 	case PM_ABOUT: about(wm); break;
 	case PM_KEYS:
 		open_dialog(wm, "Keyboard",
@@ -924,10 +982,14 @@ static void open_menu(struct pm *pm, int which, int x, int y)
 		ADD("Exit Desktop\tAlt+X", 0, PM_EXIT);
 		break;
 	case 1:
+		ADD("Auto Arrange", setting_int("pm.autoarrange") ? MI_CHECKED : 0, PM_AUTOARRANGE);
+		ADD("Minimize on Use", setting_int("pm.minonuse") ? MI_CHECKED : 0, PM_MINONUSE);
+		ADD("Save Settings on Exit", setting_int("pm.savesettings") ? MI_CHECKED : 0, PM_SAVESETTINGS);
+		ADD("", MI_SEP, 0);
 		ADD("Control Panel", 0, PM_CONTROL);
 		ADD("Themes...", 0, PM_THEMES);
 		ADD("Desktop...", 0, PM_DESKTOP);
-		ADD("Date & Time...", 0, PM_DATE);
+		ADD("Date && Time...", 0, PM_DATE);
 		break;
 	case 2:
 		ADD("Cascade", 0, PM_CASCADE);
@@ -943,6 +1005,8 @@ static void open_menu(struct pm *pm, int which, int x, int y)
 		}
 		break;
 	case 3:
+		ADD("Contents\tF1", 0, PM_HELP);
+		ADD("", MI_SEP, 0);
 		ADD("About bdos", 0, PM_ABOUT);
 		ADD("Keyboard", 0, PM_KEYS);
 		break;
@@ -962,11 +1026,6 @@ static int hit_group(struct pm *pm, int x, int y, int *gi_out, int *edges)
 	struct rect ws = workspace(pm);
 	if (!rect_has(ws, x, y))
 		return HIT_NONE;
-	for (int gi = 0; gi < pm->n; gi++)
-		if (pm->g[gi].minimized && rect_has(gicon(pm, gi), x, y)) {
-			*gi_out = gi;
-			return HIT_ICON;
-		}
 	for (int zi = pm->n - 1; zi >= 0; zi--) {
 		int gi = pm->z[zi];
 		struct pgroup *g = &pm->g[gi];
@@ -999,6 +1058,11 @@ static int hit_group(struct pm *pm, int x, int y, int *gi_out, int *edges)
 			return HIT_SB;
 		return HIT_CLIENT;
 	}
+	for (int gi = 0; gi < pm->n; gi++)
+		if (pm->g[gi].minimized && rect_has(gicon(pm, gi), x, y)) {
+			*gi_out = gi;
+			return HIT_ICON;
+		}
 	return HIT_NONE;
 }
 
@@ -1218,6 +1282,10 @@ static void pm_key(struct win *w, int k)
 {
 	struct pm *pm = PM(w);
 	struct pgroup *g = agroup(pm);
+	if (k == KEY_F1) {
+		launch_cmd(w->wm, "Help", "@help");
+		return;
+	}
 	if (k == '\t' || k == KEY_SHIFT_TAB) {	/* next group */
 		if (pm->n > 1) {
 			if (k == '\t') {
@@ -1340,17 +1408,50 @@ static void pm_resized(struct win *w)
 	pm_render(w);
 }
 
+/* the Program Manager window remembers where it was, and whether it was an icon */
+static void pm_save_window(struct win *w)
+{
+	if (w->wm->depth || !setting_int("pm.savesettings"))
+		return;
+	struct rect r = w->maximized ? w->restore : frame_rect(w);
+	char v[64];
+	snprintf(v, sizeof v, "%d %d %d %d %d %d", r.x, r.y, r.w, r.h, w->minimized, w->maximized);
+	vfs_xattr_set(PM_ROOT, "pm.window", v);
+}
+
 static void pm_destroy(struct win *w)
 {
 	struct pm *pm = PM(w);
+	pm_save_window(w);
 	for (int i = 0; i < pm->n; i++)
 		kfree(pm->g[i].items);
 	kfree(pm);
 	w->priv = NULL;
 }
 
+/* the wheel: the group under the pointer if its icons scroll, else the workspace */
+static void pm_wheel(struct win *w, int x, int y, int clicks)
+{
+	struct pm *pm = PM(w);
+	int gi = -1, edges = 0;
+	int hit = hit_group(pm, x, y, &gi, &edges);
+	if ((hit == HIT_CLIENT || hit == HIT_SB) && gi >= 0 && pm->g[gi].sb.total > pm->g[gi].sb.visible) {
+		struct pgroup *g = &pm->g[gi];
+		g->sb.pos -= clicks * CELL_H;
+		sb_clamp(&g->sb);
+	} else if (pm->show_vs) {
+		pm->vs.pos -= clicks * 3 * 16;
+		sb_clamp(&pm->vs);
+		pm->sy = pm->vs.pos;
+	} else {
+		return;
+	}
+	pm_render(w);
+}
+
 static const struct winops pm_ops = {
 	.key = pm_key,
+	.wheel = pm_wheel,
 	.mouse = pm_mouse,
 	.context = pm_context,
 	.resized = pm_resized,
@@ -1359,6 +1460,53 @@ static const struct winops pm_ops = {
 	.drop = pm_drop,
 	.icon = "group",
 };
+
+static int sscanf6(const char *s, int *a, int *b, int *c, int *d, int *e, int *f)
+{
+	int *out[6] = { a, b, c, d, e, f };
+	for (int i = 0; i < 6; i++) {
+		while (*s == ' ')
+			s++;
+		if (!*s)
+			return i;
+		const char *end;
+		*out[i] = (int)strtol(s, &end, 10);
+		if (end == s)
+			return i;
+		s = end;
+	}
+	return 6;
+}
+
+/* Everything in the Startup group starts with the desktop, as in Windows */
+struct startup {
+	struct wm *wm;
+	char names[16][VFS_NAME_MAX];
+	int n;
+};
+
+static int startup_one(void *arg, struct vstat *st)
+{
+	struct startup *s = arg;
+	if (s->n < 16 && st->name[0] != '.')
+		strncpy0(s->names[s->n++], st->name, VFS_NAME_MAX);
+	return 0;
+}
+
+void progman_startup(struct wm *wm)
+{
+	struct startup *s = kzalloc(sizeof *s);
+	if (!s)
+		return;
+	s->wm = wm;
+	vfs_list(PM_ROOT "\\Startup", startup_one, s);
+	for (int i = 0; i < s->n; i++) {
+		char path[VFS_PATH_MAX];
+		vfs_join(PM_ROOT "\\Startup", s->names[i], path, sizeof path);
+		launch_path(wm, path);
+	}
+	kfree(s);
+}
 
 struct win *open_progman(struct wm *wm)
 {
@@ -1382,6 +1530,17 @@ struct win *open_progman(struct wm *wm)
 	w->menubar = &pm->mb;
 	wm->progman = w;
 	pm_scan(pm);
+	char v[64];
+	int x, y, fw, fh, mn, mx;
+	if (!wm->depth && !vfs_xattr_get(PM_ROOT, "pm.window", v, sizeof v) &&
+	    sscanf6(v, &x, &y, &fw, &fh, &mn, &mx) == 6 && fw >= 200 && fh >= 120 && x >= -fw / 2 && y >= 0 &&
+	    x + fw / 2 < sw && y + 20 < sh) {
+		win_resize(w, x, y, MIN(fw, sw), MIN(fh, sh));
+		if (mx)
+			toggle_maximize(wm, w);
+		if (mn)
+			win_minimize(w, 1);
+	}
 	pm_render(w);
 	return w;
 }

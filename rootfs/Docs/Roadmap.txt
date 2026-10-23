@@ -15,6 +15,16 @@ bdos roadmap
 [x] 8086 emulator for .COM and .EXE programs
 [x] Windows 3.1 shell: MDI Program Manager, File Manager, minimize,
     right-click menus, drag and drop, themes, a time-of-day desktop
-[ ] DOS compatibility pass: timer IRQ, mode 13h in a window, INT 33h mouse
-[ ] TCP, DNS, telnet
-[ ] Lemote Yeeloong (MIPS64) port - planned, arch layer split (docs/PORTING-YEELOONG.md)
+[x] Every core: SMP, preemptive tasks, Pulse, CPU$, CPU \\HOST
+[x] DOS: a 386/486 with the x87, PIT/PIC/keyboard, VGA (13h, planar, mode X,
+    VESA), INT 33h mouse, speed control, saved states
+[x] DOS: a DPMI host for protected-mode programs
+[x] Sound: HD Audio, a mixer, PLAY; a Sound Blaster 16 and OPL2 for DOS
+[x] Native 64-bit programs: user mode, threads, a C library, TCC
+[x] TCP, DNS, TELNET (client and server), FETCH
+[x] Windows 3.1 keyboard: menu-bar arrows, Move/Size, Program Manager remembers
+[x] USB keyboards, mice and tablets (xHCI); NVMe disks
+[~] Lemote Yeeloong (MIPS64): boots on QEMU's Fuloong 2E; display, PCI and
+    keyboard to do (docs/PORTING-YEELOONG.md in the source)
+[ ] USB hubs; HD Audio recording
+[ ] TLS for FETCH and bterm

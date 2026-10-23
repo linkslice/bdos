@@ -7,6 +7,8 @@
  */
 #include "kernel.h"
 
+static struct spinlock lock = SPINLOCK_INIT;
+
 static uint8_t *bitmap;		/* 1 = used */
 static uint64_t npages;		/* pages covered by the bitmap */
 static uint64_t total_bytes, free_pages;
@@ -38,7 +40,7 @@ void pmm_init(const struct bdos_bootinfo *bi)
 		uint64_t base = r->base < 0x100000 ? 0x100000 : r->base;
 		uint64_t end = r->base + r->pages * PAGE_SIZE;
 		if (r->type == BDOS_MEM_FREE && end > base && end - base >= bm_pages * PAGE_SIZE)
-			bitmap = (uint8_t *)base;
+			bitmap = (uint8_t *)P2V(base);
 	}
 	if (!bitmap)
 		panic("no room for the page bitmap");
@@ -55,7 +57,7 @@ void pmm_init(const struct bdos_bootinfo *bi)
 			free_pages++;
 		}
 	}
-	uint64_t b0 = (uint64_t)bitmap / PAGE_SIZE;
+	uint64_t b0 = V2P(bitmap) / PAGE_SIZE;
 	for (uint64_t p = b0; p < b0 + bm_pages; p++) {
 		set(p);
 		free_pages--;
@@ -67,7 +69,7 @@ void *pmm_alloc(size_t n)
 {
 	if (!n)
 		return NULL;
-	uint64_t f = irq_save();
+	uint64_t f = spin_lock_irqsave(&lock);
 	for (int pass = 0; pass < 2; pass++) {
 		uint64_t start = pass ? 0x100000 / PAGE_SIZE : hint;
 		uint64_t run = 0;
@@ -87,21 +89,21 @@ void *pmm_alloc(size_t n)
 					set(q);
 				free_pages -= n;
 				hint = p + 1;
-				irq_restore(f);
-				void *mem = (void *)(first * PAGE_SIZE);
+				spin_unlock_irqrestore(&lock, f);
+				void *mem = P2V(first * PAGE_SIZE);
 				memset(mem, 0, n * PAGE_SIZE);
 				return mem;
 			}
 		}
 	}
-	irq_restore(f);
+	spin_unlock_irqrestore(&lock, f);
 	return NULL;
 }
 
 void pmm_free(void *mem, size_t n)
 {
-	uint64_t f = irq_save();
-	uint64_t first = (uint64_t)mem / PAGE_SIZE;
+	uint64_t f = spin_lock_irqsave(&lock);
+	uint64_t first = V2P(mem) / PAGE_SIZE;
 	for (uint64_t p = first; p < first + n; p++) {
 		if (!used(p))
 			panic("pmm_free: page %lx already free", p);
@@ -110,7 +112,7 @@ void pmm_free(void *mem, size_t n)
 	free_pages += n;
 	if (first < hint)
 		hint = first;
-	irq_restore(f);
+	spin_unlock_irqrestore(&lock, f);
 }
 
 uint64_t pmm_total(void) { return total_bytes; }

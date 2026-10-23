@@ -609,7 +609,10 @@ static void spawn_service(struct conn *c)
 void net_init(void)
 {
 	extern void e1000_init(void);
+	extern void virtio_net_init(void);
 	e1000_init();
+	if (!nif)
+		virtio_net_init();
 	if (!nif)
 		return;
 	/* hostname: C:\BDOS\HOSTNAME.TXT, else BDOS-xxxxxx from the MAC */

@@ -1,0 +1,37 @@
+Native programs
+===============
+
+Besides DOS programs and interpreted BASIC and C, bdos runs real 64-bit
+programs: an .EXE that is an ELF file (not an MZ one) runs in user mode,
+in its own address space, with threads that use every core.
+
+Building them, on bdos
+----------------------
+TCC, the Tiny C Compiler, is in C:\BIN:
+
+    C:\>cd \bdos\samples
+    C:\BDOS\SAMPLES>tcc primes.c          makes PRIMES.EXE
+    C:\BDOS\SAMPLES>primes 5000000
+    C:\BDOS\SAMPLES>tcc -run hello64.c a b   compiles and runs it, no file
+
+The headers are in C:\BDOS\INCLUDE, the library in C:\BDOS\LIB, and TCC's
+own files in C:\BDOS\TCC (its licence, the LGPL, is in COPYING.TXT there).
+
+What the library has
+--------------------
+stdio (printf, scanf, files), stdlib, string, ctype, math, time, setjmp,
+dirent, a little of unistd and fcntl, and bdos.h:
+
+    bdos_thread(fn, arg) / bdos_join(id)    threads, one per core if you like
+    bdos_lock / bdos_unlock                 a mutex that sleeps
+    bdos_cores, bdos_ms, bdos_us            how many cores; the time
+    bdos_key, bdos_cls, bdos_goto, bdos_color   the console
+    bdos_resolve, bdos_tcp_connect, bdos_tcp_listen, bdos_tcp_accept,
+    bdos_tcp_send, bdos_tcp_recv, bdos_tcp_close     TCP/IP
+    bdos_audio_open, bdos_audio_write, bdos_audio_close   sound
+    bdos_sys("Name", "types", ...)          the same SYS calls as BASIC and C
+
+Samples: HELLO64.C, PRIMES.C (every core), SPIN64.C, LIBCTEST.C,
+HTTPGET.C (TCP), TUNE.C (sound).
+
+Ctrl+C stops a native program.

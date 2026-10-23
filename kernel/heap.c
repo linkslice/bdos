@@ -5,6 +5,8 @@
  */
 #include "kernel.h"
 
+static struct spinlock lock = SPINLOCK_INIT;
+
 #define MIN_SHIFT 5		/* 32 bytes */
 #define MAX_SHIFT 11		/* 2048 bytes */
 #define NCLASSES (MAX_SHIFT - MIN_SHIFT + 1)
@@ -36,13 +38,13 @@ void *kmalloc(size_t n)
 	size_t total = n + sizeof(struct hdr);
 	int c = class_for(total);
 	struct hdr *h;
-	uint64_t f = irq_save();
+	uint64_t f = spin_lock_irqsave(&lock);
 
 	if (c < 0) {
 		size_t pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
 		h = pmm_alloc(pages);
 		if (!h) {
-			irq_restore(f);
+			spin_unlock_irqrestore(&lock, f);
 			return NULL;
 		}
 		h->cls = 0xFF;
@@ -52,7 +54,7 @@ void *kmalloc(size_t n)
 		if (!freelist[c]) {
 			uint8_t *page = pmm_alloc(1);
 			if (!page) {
-				irq_restore(f);
+				spin_unlock_irqrestore(&lock, f);
 				return NULL;
 			}
 			size_t sz = 1UL << (c + MIN_SHIFT);
@@ -69,7 +71,7 @@ void *kmalloc(size_t n)
 		in_use += 1UL << (c + MIN_SHIFT);
 	}
 	h->magic = MAGIC;
-	irq_restore(f);
+	spin_unlock_irqrestore(&lock, f);
 	return h + 1;
 }
 
@@ -96,7 +98,7 @@ void kfree(void *p)
 	if (h->magic != MAGIC)
 		panic("kfree: bad pointer %p", p);
 	h->magic = 0;
-	uint64_t f = irq_save();
+	uint64_t f = spin_lock_irqsave(&lock);
 	if (h->cls == 0xFF) {
 		in_use -= h->pages * PAGE_SIZE;
 		pmm_free(h, h->pages);
@@ -108,7 +110,7 @@ void kfree(void *p)
 		b->next = freelist[cls];
 		freelist[cls] = b;
 	}
-	irq_restore(f);
+	spin_unlock_irqrestore(&lock, f);
 }
 
 void *krealloc(void *p, size_t n)

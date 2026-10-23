@@ -13,16 +13,44 @@ struct desc_ptr {
 
 #define KCODE 0x08
 #define KDATA 0x10
+/* user selectors, in the order SYSRET wants: 0x18 32-bit code (unused),
+ * 0x20 data, 0x28 64-bit code; then the TSS */
+#define TSS_SEL 0x30
 
-static const uint64_t gdt[] = {
-	0,
-	0x00AF9A000000FFFFULL,	/* 0x08: 64-bit code, ring 0 */
-	0x00CF92000000FFFFULL,	/* 0x10: data, ring 0 */
+struct tss {
+	uint32_t res0;
+	uint64_t rsp0, rsp1, rsp2;
+	uint64_t res1;
+	uint64_t ist[7];
+	uint64_t res2;
+	uint16_t res3;
+	uint16_t iomap;
+} __attribute__((packed));
+
+/* each core's own GDT and TSS (the TSS says which stack interrupts from
+ * user mode use, and that's per core) */
+struct arch_cpu {
+	uint64_t gdt[8];
+	struct tss tss;
+	uint8_t df_stack[8192] __attribute__((aligned(16)));	/* double faults */
 };
+static struct arch_cpu arch_cpus[MAX_CPUS];
 
-static void gdt_init(void)
+static void gdt_load(struct arch_cpu *a)
 {
-	struct desc_ptr gp = { sizeof gdt - 1, (uint64_t)gdt };
+	a->gdt[0] = 0;
+	a->gdt[1] = 0x00AF9A000000FFFFULL;	/* 0x08: 64-bit code, ring 0 */
+	a->gdt[2] = 0x00CF92000000FFFFULL;	/* 0x10: data, ring 0 */
+	a->gdt[3] = 0x00CFFA000000FFFFULL;	/* 0x18: 32-bit code, ring 3 */
+	a->gdt[4] = 0x00CFF2000000FFFFULL;	/* 0x20: data, ring 3 */
+	a->gdt[5] = 0x00AFFA000000FFFFULL;	/* 0x28: 64-bit code, ring 3 */
+	uint64_t base = (uint64_t)&a->tss, limit = sizeof a->tss - 1;
+	a->gdt[6] = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ULL << 40) |
+	    (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
+	a->gdt[7] = base >> 32;
+	a->tss.iomap = sizeof a->tss;		/* no I/O permission map */
+	a->tss.ist[0] = (uint64_t)(a->df_stack + sizeof a->df_stack);
+	struct desc_ptr gp = { sizeof a->gdt - 1, (uint64_t)a->gdt };
 	__asm__ volatile(
 	    "lgdt %0\n\t"
 	    "pushq %1\n\t"
@@ -40,7 +68,28 @@ static void gdt_init(void)
 	    :
 	    : "m"(gp), "i"(KCODE), "i"(KDATA)
 	    : "rax", "memory");
+	__asm__ volatile("ltr %w0" : : "r"(TSS_SEL));
 }
+
+void arch_cpu_local(struct cpu *c)
+{
+	struct arch_cpu *a = &arch_cpus[c->id];
+	c->self = c;
+	c->arch = a;
+	gdt_load(a);
+	wrmsr(0xC0000101, (uint64_t)c);		/* GS base */
+	wrmsr(0xC0000102, 0);			/* kernel GS base (for swapgs) */
+}
+
+void arch_set_kstack(void *top)
+{
+	struct cpu *c = this_cpu();
+	struct arch_cpu *a = c->arch;
+	a->tss.rsp0 = (uint64_t)top;
+	c->kstack = (uint64_t)top;
+}
+
+uint64_t *arch_kernel_pml4(void);
 
 /* ---- IDT and trap dispatch ---------------------------------------------- */
 
@@ -63,14 +112,14 @@ struct trapframe {
 
 static struct idt_entry idt[256];
 extern const uint64_t isr_table[48];
-extern const uint64_t isr_spurious;
+extern const uint64_t isr_spurious, isr_lapic[3];
 static void (*irq_handlers[16])(void);
 
 static void idt_set(int vec, uint64_t addr)
 {
 	idt[vec].off_lo = addr & 0xFFFF;
 	idt[vec].sel = KCODE;
-	idt[vec].ist = 0;
+	idt[vec].ist = vec == 8 ? 1 : 0;	/* double fault: a known-good stack */
 	idt[vec].type = 0x8E;	/* present, ring 0, interrupt gate */
 	idt[vec].off_mid = (addr >> 16) & 0xFFFF;
 	idt[vec].off_hi = addr >> 32;
@@ -93,9 +142,29 @@ static const char *const exc_names[32] = {
 #define PIC2_CMD 0xA0
 #define PIC2_DAT 0xA1
 
+void lapic_eoi(void);
+void (*user_trap)(void *tf);	/* native programs' faults */
+void proc_check(void);
+
 void trap_dispatch(struct trapframe *tf)
 {
 	uint64_t v = tf->vector;
+
+	if (v == VEC_TIMER) {			/* this core's own timer */
+		lapic_eoi();
+		sched_tick();
+		sched_preempt_check();
+		if (tf->cs & 3)
+			proc_check();
+		return;
+	}
+	if (v == VEC_KICK) {			/* just a wake-up */
+		lapic_eoi();
+		sched_preempt_check();
+		return;
+	}
+	if (v == VEC_HALT)			/* someone panicked */
+		arch_halt();
 
 	if (v >= 32 && v < 48) {
 		int irq = (int)v - 32;
@@ -114,6 +183,15 @@ void trap_dispatch(struct trapframe *tf)
 		if (irq >= 8)
 			outb(PIC2_CMD, 0x20);
 		outb(PIC1_CMD, 0x20);
+		if (irq != IRQ_TIMER)
+			sched_kick();		/* something happened: pollers, look */
+		sched_preempt_check();
+		if (tf->cs & 3)
+			proc_check();
+		return;
+	}
+	if ((tf->cs & 3) && user_trap) {	/* a native program's fault */
+		user_trap(tf);
 		return;
 	}
 	if (v == 255)
@@ -155,8 +233,21 @@ void irq_register(int irq, void (*fn)(void))
 #define PTE_PS	(1ULL << 7)
 
 static uint64_t pml4[512] __attribute__((aligned(4096)));
+
+uint64_t *arch_kernel_pml4(void)
+{
+	return pml4;
+}
 static uint64_t pdpt[512] __attribute__((aligned(4096)));
 static uint64_t pds[MAX_GB][512] __attribute__((aligned(4096)));
+
+static void pat_init(void)
+{
+	/* PAT entry 1 becomes write-combining (default is write-through). */
+	uint64_t pat = rdmsr(0x277);
+	pat = (pat & ~(0xFFULL << 8)) | (0x01ULL << 8);
+	wrmsr(0x277, pat);
+}
 
 static int range_is_ram(const struct bdos_bootinfo *bi, uint64_t lo, uint64_t hi)
 {
@@ -171,12 +262,38 @@ static int range_is_ram(const struct bdos_bootinfo *bi, uint64_t lo, uint64_t hi
 	return 0;
 }
 
+/* MMIO above what the identity map covers (64-bit BARs, often far up): mapped
+ * into a window at 508 GB, 2 MB pages, uncached */
+#define MMIO_WINDOW_GB 508
+static uint64_t mmio_pd[512] __attribute__((aligned(4096)));
+static int mmio_next;
+static uint64_t identity_top;
+
+void *arch_map_mmio(uint64_t pa, uint64_t size)
+{
+	if (pa + size <= identity_top)
+		return (void *)pa;
+	uint64_t base = pa & ~((2ULL << 20) - 1), end = pa + size;
+	int n = (int)((end - base + (2ULL << 20) - 1) >> 21);
+	if (mmio_next + n > 512)
+		return NULL;
+	/* already mapped? */
+	for (int i = 0; i + n <= mmio_next; i++)
+		if ((mmio_pd[i] & ~0xFFFULL & ~((2ULL << 20) - 1)) == base)
+			return (void *)(((uint64_t)MMIO_WINDOW_GB << 30) + ((uint64_t)i << 21) + (pa - base));
+	int at = mmio_next;
+	for (int i = 0; i < n; i++)
+		mmio_pd[at + i] = (base + ((uint64_t)i << 21)) | PTE_P | PTE_W | PTE_PS | PTE_PCD | PTE_PWT;
+	mmio_next += n;
+	pdpt[MMIO_WINDOW_GB] = (uint64_t)mmio_pd | PTE_P | PTE_W;
+	uint64_t cr3;
+	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
+	return (void *)(((uint64_t)MMIO_WINDOW_GB << 30) + ((uint64_t)at << 21) + (pa - base));
+}
+
 static void paging_init(const struct bdos_bootinfo *bi)
 {
-	/* PAT entry 1 becomes write-combining (default is write-through). */
-	uint64_t pat = rdmsr(0x277);
-	pat = (pat & ~(0xFFULL << 8)) | (0x01ULL << 8);
-	wrmsr(0x277, pat);
+	pat_init();
 
 	uint64_t top = 4ULL << 30;	/* always cover the 32-bit MMIO hole */
 	for (uint32_t i = 0; i < bi->nranges; i++) {
@@ -203,6 +320,7 @@ static void paging_init(const struct bdos_bootinfo *bi)
 		}
 		pdpt[g] = (uint64_t)pds[g] | PTE_P | PTE_W;
 	}
+	identity_top = (uint64_t)gbs << 30;
 	pml4[0] = (uint64_t)pdpt | PTE_P | PTE_W;
 	__asm__ volatile("mov %0, %%cr3" : : "r"((uint64_t)pml4) : "memory");
 }
@@ -247,6 +365,7 @@ static void lapic_passthrough(void)
 static void timer_irq(void)
 {
 	timer_tick();
+	sched_tick();
 }
 
 static void pit_init(void)
@@ -275,16 +394,42 @@ static void fpu_init(void)
 	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
 }
 
+static void idt_load(void)
+{
+	struct desc_ptr ip = { sizeof idt - 1, (uint64_t)idt };
+	__asm__ volatile("lidt %0" : : "m"(ip));
+}
+
+/* what every extra core needs before it can run tasks */
+void arch_ap_setup(struct cpu *c)
+{
+	arch_cpu_local(c);
+	idt_load();
+	pat_init();
+	fpu_init();
+	arch_syscall_init();
+}
+
+uint64_t arch_cr3(void)
+{
+	uint64_t v;
+	__asm__ volatile("mov %%cr3, %0" : "=r"(v));
+	return v;
+}
+
 void arch_init(const void *bootinfo_ptr)
 {
 	const struct bdos_bootinfo *bi = bootinfo_ptr;
-	gdt_init();
+	cpus[0].id = 0;
+	arch_cpu_local(&cpus[0]);
 	fpu_init();
 	for (int i = 0; i < 48; i++)
 		idt_set(i, isr_table[i]);
 	idt_set(255, isr_spurious);
-	struct desc_ptr ip = { sizeof idt - 1, (uint64_t)idt };
-	__asm__ volatile("lidt %0" : : "m"(ip));
+	idt_set(VEC_TIMER, isr_lapic[0]);
+	idt_set(VEC_KICK, isr_lapic[1]);
+	idt_set(VEC_HALT, isr_lapic[2]);
+	idt_load();
 	paging_init(bi);
 	pic_init();
 	lapic_passthrough();
@@ -429,4 +574,22 @@ void arch_cpu_name(char *out, int n)
 	while (*p == ' ')
 		p++;
 	strncpy0(out, p, (size_t)n);
+}
+
+/* ---- the speaker ---------------------------------------------------------- */
+
+void arch_speaker(uint32_t hz)
+{
+	uint8_t v = inb(0x61);
+	if (!hz) {
+		outb(0x61, v & 0xFC);
+		return;
+	}
+	uint32_t div = PIT_HZ / hz;
+	if (div > 0xFFFF)
+		div = 0xFFFF;
+	outb(0x43, 0xB6);		/* channel 2, lo/hi, square wave */
+	outb(0x42, (uint8_t)div);
+	outb(0x42, (uint8_t)(div >> 8));
+	outb(0x61, v | 3);
 }

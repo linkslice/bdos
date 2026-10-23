@@ -89,6 +89,12 @@ uint64_t pci_bar_mem(struct pci_dev *d, int i)
 	return addr;
 }
 
+volatile void *pci_map_bar(struct pci_dev *d, int i, uint64_t size)
+{
+	uint64_t pa = pci_bar_mem(d, i);
+	return pa ? arch_map_mmio(pa, size) : NULL;
+}
+
 uint16_t pci_bar_io(struct pci_dev *d, int i)
 {
 	return (d->bar[i] & 1) ? (uint16_t)(d->bar[i] & ~3u) : 0;

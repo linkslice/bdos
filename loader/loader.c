@@ -392,6 +392,12 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 		puts16(L" KiB\r\n");
 	}
 
+	UINTN lsize;
+	if (read_file(image, L"\\BDOS\\LIVE.TXT", &lsize, 1, EfiLoaderData)) {
+		bi->flags |= BDOS_BOOT_LIVE;
+		puts16(L"Live CD: C: is the RAM disk\r\n");
+	}
+
 	bi->acpi_rsdp = find_rsdp();
 
 	/* Last chance to talk through the firmware console. */

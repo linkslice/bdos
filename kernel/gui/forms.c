@@ -19,6 +19,7 @@ struct fwidget {
 	char icon[16];
 	char **items;
 	int nitems, top;
+	long shown_val;		/* list: the selection when top was last fitted to it */
 	int typing;		/* spin: digits typed since focus */
 	form_draw_fn draw;
 };
@@ -37,8 +38,12 @@ struct form {
 	int tick_ms;
 	uint64_t next_tick;
 	int px, py;		/* last click, relative to the widget */
+	int buttons;
+	int (*key_fn)(struct form *f, int key);
 	int drag;		/* slider being dragged, -1 none */
 	char title[64];
+	const char *icon;
+	void (*icon_fn)(struct form *f, struct surface *s, int x, int y);
 };
 
 
@@ -132,6 +137,20 @@ uint32_t form_rgb(struct form *f, int id) { return W(f, id)->rgb; }
 void *form_priv(struct form *f) { return f->priv; }
 struct wm *form_wm(struct form *f) { return f->wm; }
 void form_point(struct form *f, int *x, int *y) { *x = f->px; *y = f->py; }
+int form_buttons(struct form *f) { return f->buttons; }
+void form_key_hook(struct form *f, int (*fn)(struct form *f, int key)) { f->key_fn = fn; }
+int form_is_active(struct form *f) { return f->win && f->wm && f->wm->focus == f->win; }
+int form_is_minimized(struct form *f) { return f->win && f->win->minimized; }
+
+void form_pointer(struct form *f, int *x, int *y)
+{
+	if (!f->win || !f->wm) {
+		*x = *y = -10000;
+		return;
+	}
+	*x = f->wm->mx - f->win->x - CLIENT_X;
+	*y = f->wm->my - f->win->y - CLIENT_Y;
+}
 
 void form_move(struct form *f, int id, int x, int y, int w, int h)
 {
@@ -175,6 +194,18 @@ void form_list_add(struct form *f, int id, const char *line)
 		return;
 	d->items = n;
 	d->items[d->nitems++] = kstrdup(line);
+}
+
+int form_list_top(struct form *f, int id) { return W(f, id)->top; }
+int form_list_count(struct form *f, int id) { return W(f, id)->nitems; }
+int form_list_rows(struct form *f, int id) { return MAX(1, (W(f, id)->h - 4) / 18); }
+
+void form_list_set_top(struct form *f, int id, int top)
+{
+	struct fwidget *d = W(f, id);
+	d->top = MAX(0, MIN(top, d->nitems - form_list_rows(f, id)));
+	d->shown_val = d->val;
+	form_redraw(f);
 }
 
 void form_tick(struct form *f, int ms)
@@ -464,10 +495,14 @@ static void render_widget(struct form *f, int i)
 	case FW_LIST: {
 		sunken(s, d->x, d->y, d->w, d->h, 0xFFFFFF);
 		int rows = MAX(1, (d->h - 4) / 18);
-		if (d->val < d->top)
-			d->top = (int)d->val;
-		if (d->val >= d->top + rows)
-			d->top = (int)d->val - rows + 1;
+		if (d->val != d->shown_val) {	/* a new selection: show it (the wheel may not) */
+			if (d->val < d->top)
+				d->top = (int)d->val;
+			if (d->val >= d->top + rows)
+				d->top = (int)d->val - rows + 1;
+			d->shown_val = d->val;
+		}
+		d->top = MAX(0, MIN(d->top, d->nitems - rows));
 		struct rect save = s->clip;
 		surf_clip(s, (struct rect){ d->x + 2, d->y + 2, d->w - 4, d->h - 4 });
 		for (int k = d->top; k < d->nitems && k < d->top + rows; k++) {
@@ -564,6 +599,10 @@ static void form_key(struct wm *wm, struct win *w, int k)
 	struct form *f = w->form;
 	if (!f || f->dead)
 		return;
+	if (f->key_fn && f->key_fn(f, k)) {
+		form_settle(f);
+		return;
+	}
 	struct fwidget *d = f->focus >= 0 ? &f->wd[f->focus] : NULL;
 	if (k == 27) {
 		form_close(f);
@@ -571,6 +610,19 @@ static void form_key(struct wm *wm, struct win *w, int k)
 		form_next_focus(f, 1);
 	} else if (k == KEY_SHIFT_TAB) {
 		form_next_focus(f, -1);
+	} else if (d && d->kind == FW_EDIT && (k == 3 || (k == KEY_INS && (input_mods() & 2)))) {
+		clip_text_set(d->text, strlen(d->text));	/* Ctrl+C: the whole field */
+	} else if (d && d->kind == FW_EDIT && (k == 22 || (k == KEY_INS && (input_mods() & 1)))) {
+		size_t l = strlen(d->text);		/* Ctrl+V: the first line of the clipboard */
+		for (const char *p = clip_text_get(); *p && *p != '\r' && *p != '\n' && l + 1 < sizeof d->text; p++)
+			if ((unsigned char)*p >= 0x20 && (unsigned char)*p < 0x7F)
+				d->text[l++] = *p;
+		d->text[l] = 0;
+		form_emit(f, f->focus, FE_CHANGE);
+	} else if (d && d->kind == FW_EDIT && k == 24) {	/* Ctrl+X */
+		clip_text_set(d->text, strlen(d->text));
+		d->text[0] = 0;
+		form_emit(f, f->focus, FE_CHANGE);
 	} else if (d && d->kind == FW_EDIT && k == '\b') {
 		size_t l = strlen(d->text);
 		if (l) {
@@ -746,6 +798,8 @@ void form_tick_all(struct wm *wm)
 			f->next_tick = now + (uint64_t)f->tick_ms;
 			form_emit(f, -1, FE_TICK);
 			form_settle(f);
+			if (f->icon_fn && !f->dead)
+				win_icon_dirty(w);
 		}
 		w = next;
 	}
@@ -784,12 +838,34 @@ static void form_mouse_op(struct win *w, int type, int x, int y, int buttons, in
 {
 	if (!w->form)
 		return;
-	if (type == EV_DOWN && (buttons & 1))
+	if (type == EV_DOWN && (buttons & 1)) {
+		w->form->buttons = buttons;
 		form_click(w->wm, w, x, y, dbl);
+	}
 	else if (type == EV_MOVE && (buttons & 1))
 		form_drag(w, x, y);
 	else if (type == EV_UP && w->form)
 		w->form->drag = -1;
+}
+
+/* a right click: custom areas hear it, anything else gets the window menu */
+static void form_context_op(struct win *w, int x, int y)
+{
+	struct form *f = w->form;
+	if (f && !f->dead)
+		for (int i = f->n - 1; i >= 0; i--) {
+			struct fwidget *d = &f->wd[i];
+			if (d->kind != FW_CUSTOM || d->hidden || x < d->x || x >= d->x + d->w || y < d->y ||
+			    y >= d->y + d->h)
+				continue;
+			f->px = x - d->x;
+			f->py = y - d->y;
+			f->buttons = 2;
+			form_emit(f, i, FE_RCLICK);
+			form_settle(f);
+			return;
+		}
+	control_menu(w->wm, w, w->x + CLIENT_X + x, w->y + CLIENT_Y + y);
 }
 
 static void form_resized_op(struct win *w)
@@ -809,9 +885,59 @@ static void form_destroy_op(struct win *w)
 	w->form = NULL;
 }
 
+static void form_draw_icon_op(struct win *w, struct surface *s, int x, int y)
+{
+	struct form *f = w->form;
+	if (f && f->icon_fn)
+		f->icon_fn(f, s, x, y);
+	else
+		draw_icon(s, x, y, f && f->icon ? f->icon : "control");
+}
+
+void form_icon_name(struct form *f, const char *icon)
+{
+	f->icon = icon;
+}
+
+void form_icon_draw(struct form *f, void (*fn)(struct form *f, struct surface *s, int x, int y))
+{
+	f->icon_fn = fn;
+}
+
+/* the wheel scrolls the list under the pointer, or nudges a slider or spin box */
+static void form_wheel_op(struct win *w, int x, int y, int clicks)
+{
+	struct form *f = w->form;
+	if (!f || f->dead)
+		return;
+	for (int i = f->n - 1; i >= 0; i--) {
+		struct fwidget *d = &f->wd[i];
+		if (d->hidden || d->disabled || x < d->x || x >= d->x + d->w || y < d->y || y >= d->y + d->h)
+			continue;
+		if (d->kind == FW_LIST) {
+			d->top -= clicks * 3;
+			d->top = MAX(0, MIN(d->top, d->nitems - MAX(1, (d->h - 4) / 18)));
+			render_form(w);
+			return;
+		}
+		if (d->kind == FW_SLIDER || d->kind == FW_SPIN) {
+			long v = MAX(d->min, MIN(d->val + clicks, d->max));
+			if (v != d->val) {
+				d->val = v;
+				form_emit(f, i, FE_CHANGE);
+				form_settle(f);
+			}
+			return;
+		}
+	}
+}
+
 const struct winops form_ops = {
+	.draw_icon = form_draw_icon_op,
+	.wheel = form_wheel_op,
 	.key = form_key_op,
 	.mouse = form_mouse_op,
+	.context = form_context_op,
 	.resized = form_resized_op,
 	.repaint = form_repaint_op,
 	.destroy = form_destroy_op,

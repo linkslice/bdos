@@ -7,7 +7,9 @@
  * Del, F2 rename, F5 refresh) or by dragging: drop files on another File
  * Manager window or a folder to move them (copy, if it's another drive, or
  * with Ctrl held), on a Program Manager group to make an icon for them, or
- * on a shell to type their names.
+ * on a shell to type their names. Cut, Copy and Paste (Ctrl+X, C, V) work
+ * through a clipboard all File Manager windows share; click, Ctrl+click,
+ * Shift+click or drag a box around files to select them.
  */
 #include "wm_int.h"
 
@@ -24,11 +26,11 @@ struct trow {
 
 struct fent {
 	struct vstat st;
-	int sel;
+	int sel, was;		/* was: the selection when a box drag began */
 };
 
 enum { SORT_NAME, SORT_TYPE, SORT_SIZE, SORT_DATE };
-enum { FMM_IDLE, FMM_PRESS, FMM_TREE_SB, FMM_LIST_SB };
+enum { FMM_IDLE, FMM_PRESS, FMM_TREE_SB, FMM_LIST_SB, FMM_BAND };
 
 struct fm {
 	struct win *w;
@@ -47,11 +49,35 @@ struct fm {
 	int focus_tree;
 	struct menubar mb;
 	int mode, px, py, press_item;
+	int bx0, by0, bx1, by1;		/* a box being dragged: list content coordinates */
 	char drives[26];
 	int ndrives;
 };
 
-static const char *const fm_menus[] = { "File", "View" };
+static const char *const fm_menus[] = { "File", "Edit", "View" };
+
+/* the clipboard: '\n'-separated paths, and whether they were cut (Paste moves them) */
+static struct {
+	char *paths;
+	int n, cut;
+} clip;
+
+static int clip_has_cut(const char *path)
+{
+	if (!clip.paths || !clip.cut)
+		return 0;
+	size_t l = strlen(path);
+	for (const char *p = clip.paths; *p; ) {
+		const char *e = strchr(p, '\n');
+		size_t pl = e ? (size_t)(e - p) : strlen(p);
+		if (pl == l && !strncasecmp(p, path, l))
+			return 1;
+		if (!e)
+			break;
+		p = e + 1;
+	}
+	return 0;
+}
 static const struct winops fm_ops;
 static void fm_render(struct win *w);
 static struct fm *FM(struct win *w) { return w->priv; }
@@ -465,6 +491,12 @@ static void fm_render(struct win *w)
 		if (hl)
 			fill(s, lr.x + 2, ry, inner_w, ROW_H, P(foc && !fm->focus_tree ? theme.select : 0xC0C0C0));
 		uint32_t ink = P(hl && foc && !fm->focus_tree ? 0xFFFFFF : 0);
+		if (clip.cut) {
+			char full[VFS_PATH_MAX];
+			vfs_join(fm->dir, e->st.name, full, sizeof full);
+			if (clip_has_cut(full))
+				ink = P(hl && foc && !fm->focus_tree ? 0xD0D0D0 : 0x808080);	/* on its way */
+		}
 		tiny_icon(s, lr.x + 6, ry + 2, e->st.type == VFS_DIR, e->st.name);
 		char name[64];
 		strncpy0(name, e->st.name, sizeof name);
@@ -491,6 +523,19 @@ static void fm_render(struct win *w)
 				plot(s, lr.x + 2 + k, ry + ROW_H - 1, P(hl ? 0xFFFFFF : 0));
 			}
 	}
+	if (fm->mode == FMM_BAND) {
+		/* the box being dragged, dotted */
+		int x0 = MIN(fm->bx0, fm->bx1), x1 = MAX(fm->bx0, fm->bx1);
+		int y0 = MIN(fm->by0, fm->by1) - fm->lsb.pos, y1 = MAX(fm->by0, fm->by1) - fm->lsb.pos;
+		for (int k = x0; k <= x1; k += 2) {
+			plot(s, k, y0, P(0));
+			plot(s, k, y1, P(0));
+		}
+		for (int k = y0; k <= y1; k += 2) {
+			plot(s, x0, k, P(0));
+			plot(s, x1, k, P(0));
+		}
+	}
 	s->clip = save;
 	if (lsb_on)
 		sb_draw(s, &fm->lsb);
@@ -511,12 +556,18 @@ static void fm_render(struct win *w)
 			selbytes += fm->ents[i].st.size;
 		}
 	}
-	char status[120], b1[32];
+	char status[200], b1[32];
 	fmt_commas(b1, sizeof b1, nsel ? selbytes : bytes);
 	if (nsel)
 		snprintf(status, sizeof status, "Selected %d of %d item(s), %s bytes", nsel, nfiles, b1);
 	else
 		snprintf(status, sizeof status, "%d item(s), %s bytes", nfiles, b1);
+	if (clip.paths && clip.n) {
+		char more[48];
+		snprintf(more, sizeof more, "   %d %s - Paste puts %s here", clip.n, clip.cut ? "cut" : "copied",
+		    clip.n == 1 ? "it" : "them");
+		strcat0(status, more, sizeof status);
+	}
 	text(s, 8, sy + 3, status, P(0));
 	win_dirty_all(w);
 }
@@ -579,7 +630,7 @@ static void transfer(struct wm *wm, const char *paths, const char *dest, int mov
 		return;
 	b->paths = kstrdup(paths);
 	strncpy0(b->dest, dest, sizeof b->dest);
-	b->flags = move ? FOP_MOVE : 0;
+	b->flags = move ? FOP_MOVE : FOP_DUP;
 	int clashes = 0;
 	char *copy = kstrdup(paths);
 	for (char *p = copy; p && *p; ) {
@@ -652,6 +703,35 @@ static void ask_transfer(struct fm *fm, int move)
 	char label[80];
 	snprintf(label, sizeof label, "%s %d item(s) to:", move ? "Move" : "Copy", n);
 	ui_prompt(fm->w->wm, move ? "Move" : "Copy", label, fm->dir, copyto_done, r);
+}
+
+/* Cut, Copy: the selection onto the clipboard */
+static void clip_take(struct fm *fm, int cut)
+{
+	int n;
+	char *paths = selection(fm, &n);
+	if (!paths || !n) {
+		kfree(paths);
+		return;
+	}
+	kfree(clip.paths);
+	clip.paths = paths;
+	clip.n = n;
+	clip.cut = cut;
+	files_refresh_all();		/* cut files grey out, everywhere */
+}
+
+/* Paste: what's on the clipboard into dest (copies stay; cut ones move) */
+static void clip_paste(struct fm *fm, const char *dest)
+{
+	if (!clip.paths || !clip.n)
+		return;
+	transfer(fm->w->wm, clip.paths, dest, clip.cut);
+	if (clip.cut) {			/* moved: nothing left to paste */
+		kfree(clip.paths);
+		clip.paths = NULL;
+		clip.n = clip.cut = 0;
+	}
 }
 
 static void delete_done(struct wm *wm, void *arg, int yes)
@@ -797,7 +877,18 @@ static void ask_mkdir(struct fm *fm)
 struct fprops {
 	char path[VFS_PATH_MAX];
 	int name, ro, hidden, sys, arch, ok, cancel;
+	int speed;		/* DOS programs: their pace, -1 when not a DOS program */
 };
+
+/* what a DOS program can be held to (see dos.speed) */
+static const char *const speed_names[] = { "Default", "XT (4.77 MHz)", "AT (286)", "386", "486", "Pentium", "As fast as possible" };
+static const char *const speed_keys[] = { "", "xt", "at", "386", "486", "pentium", "max" };
+
+static int is_dos_program(const char *name)
+{
+	const char *dot = strrchr(name, '.');
+	return dot && (!strcasecmp(dot, ".COM") || !strcasecmp(dot, ".EXE"));
+}
 
 static void fprops_event(struct form *f, int id, int ev)
 {
@@ -822,6 +913,11 @@ static void fprops_event(struct form *f, int id, int ev)
 		a |= form_val(f, p->sys) ? A_SYSTEM : 0;
 		a |= form_val(f, p->arch) ? A_ARCHIVE : 0;
 		vfs_setattr(p->path, a);
+	}
+	if (p->speed >= 0) {
+		long v = form_val(f, p->speed);
+		if (v >= 0 && v < (long)NELEM(speed_keys))
+			vfs_xattr_set(p->path, "dos.speed", speed_keys[v]);
 	}
 	const char *nn = form_text(f, p->name);
 	if (*nn && strcasecmp(nn, vfs_basename(p->path))) {
@@ -850,7 +946,8 @@ static void open_fprops(struct fm *fm)
 	vfs_join(fm->dir, e->st.name, p->path, sizeof p->path);
 	char title[80];
 	snprintf(title, sizeof title, "Properties - %s", e->st.name);
-	int cw = 440, ch = 210;
+	int dos = e->st.type != VFS_DIR && is_dos_program(e->st.name);
+	int cw = 440, ch = dos ? 250 : 210;
 	struct form *f = form_new(title, cw, ch, fprops_event, p);
 	if (!f) {
 		kfree(p);
@@ -877,6 +974,19 @@ static void open_fprops(struct fm *fm)
 	form_set_val(f, p->hidden, (e->st.attr & A_HIDDEN) != 0);
 	form_set_val(f, p->sys, (e->st.attr & A_SYSTEM) != 0);
 	form_set_val(f, p->arch, (e->st.attr & A_ARCHIVE) != 0);
+	p->speed = -1;
+	if (dos) {
+		form_add(f, FW_LABEL, 14, 172, 0, 0, "Run at:");
+		p->speed = form_add(f, FW_CHOICE, 80, 168, 220, 24, NULL);
+		form_options(f, p->speed, speed_names, (int)NELEM(speed_names));
+		char v[32] = "";
+		vfs_xattr_get(p->path, "dos.speed", v, sizeof v);
+		int sel = 0;
+		for (int i = 1; i < (int)NELEM(speed_keys); i++)
+			if (!strcasecmp(v, speed_keys[i]))
+				sel = i;
+		form_set_val(f, p->speed, sel);
+	}
 	p->ok = form_add(f, FW_BUTTON, cw - 184, ch - 38, 80, 26, "OK");
 	p->cancel = form_add(f, FW_BUTTON, cw - 96, ch - 38, 80, 26, "Cancel");
 	form_default(f, p->ok);
@@ -923,7 +1033,7 @@ static void keep_cursor_visible(struct fm *fm)
 enum {
 	FM_OPEN = 1, FM_MOVE, FM_COPY, FM_DELETE, FM_RENAME, FM_PROPS, FM_MKDIR, FM_SELALL, FM_CLOSE,
 	FM_NAMES, FM_DETAILS, FM_BYNAME, FM_BYTYPE, FM_BYSIZE, FM_BYDATE, FM_HIDDEN, FM_REFRESH, FM_NEWWIN,
-	FM_EDIT, FM_TREE_OPEN, FM_UP,
+	FM_EDIT, FM_TREE_OPEN, FM_UP, FM_CUT, FM_CLIPCOPY, FM_PASTE, FM_PASTE_INTO, FM_SELNONE, FM_INVERT,
 };
 
 static void fm_pick(struct wm *wm, void *arg, int id)
@@ -953,6 +1063,25 @@ static void fm_pick(struct wm *wm, void *arg, int id)
 		for (int i = 0; i < fm->n; i++)
 			fm->ents[i].sel = strcmp(fm->ents[i].st.name, "..") != 0;
 		break;
+	case FM_SELNONE:
+		for (int i = 0; i < fm->n; i++)
+			fm->ents[i].sel = 0;
+		break;
+	case FM_INVERT:
+		for (int i = 0; i < fm->n; i++)
+			fm->ents[i].sel = !fm->ents[i].sel && strcmp(fm->ents[i].st.name, "..");
+		break;
+	case FM_CUT: clip_take(fm, 1); break;
+	case FM_CLIPCOPY: clip_take(fm, 0); break;
+	case FM_PASTE: clip_paste(fm, fm->dir); return;
+	case FM_PASTE_INTO: {
+		struct fent *e = fm->cursor < fm->n ? &fm->ents[fm->cursor] : NULL;
+		char p[VFS_PATH_MAX];
+		if (e && e->st.type == VFS_DIR && strcmp(e->st.name, "..") &&
+		    !vfs_join(fm->dir, e->st.name, p, sizeof p))
+			clip_paste(fm, p);
+		return;
+	}
 	case FM_CLOSE: win_destroy(wm, w); return;
 	case FM_NAMES: fm->details = 0; break;
 	case FM_DETAILS: fm->details = 1; break;
@@ -985,16 +1114,23 @@ static void fm_menu(struct fm *fm, int which, int x, int y)
 #define ADD(l, f, i) menu_put(it, &n, l, f, i)
 	if (which == 0) {
 		ADD("Open\tEnter", fm->n ? 0 : MI_DISABLED, FM_OPEN);
-		ADD("Move...\tF7", nsel ? 0 : MI_DISABLED, FM_MOVE);
-		ADD("Copy...\tF8", nsel ? 0 : MI_DISABLED, FM_COPY);
+		ADD("Move To...\tF7", nsel ? 0 : MI_DISABLED, FM_MOVE);
+		ADD("Copy To...\tF8", nsel ? 0 : MI_DISABLED, FM_COPY);
 		ADD("Delete...\tDel", nsel ? 0 : MI_DISABLED, FM_DELETE);
 		ADD("Rename...\tF2", one ? 0 : MI_DISABLED, FM_RENAME);
 		ADD("Properties...", one ? 0 : MI_DISABLED, FM_PROPS);
 		ADD("", MI_SEP, 0);
 		ADD("New Folder...\tCtrl+N", 0, FM_MKDIR);
-		ADD("Select All", 0, FM_SELALL);
 		ADD("", MI_SEP, 0);
 		ADD("Close", 0, FM_CLOSE);
+	} else if (which == 1) {
+		ADD("Cut\tCtrl+X", nsel ? 0 : MI_DISABLED, FM_CUT);
+		ADD("Copy\tCtrl+C", nsel ? 0 : MI_DISABLED, FM_CLIPCOPY);
+		ADD("Paste\tCtrl+V", clip.n ? 0 : MI_DISABLED, FM_PASTE);
+		ADD("", MI_SEP, 0);
+		ADD("Select All\tCtrl+A", 0, FM_SELALL);
+		ADD("Select None", nsel ? 0 : MI_DISABLED, FM_SELNONE);
+		ADD("Invert Selection", 0, FM_INVERT);
 	} else {
 		ADD("Name Only", fm->details ? 0 : MI_CHECKED, FM_NAMES);
 		ADD("All File Details", fm->details ? MI_CHECKED : 0, FM_DETAILS);
@@ -1084,8 +1220,15 @@ static void fm_mouse(struct win *w, int type, int x, int y, int buttons, int dbl
 			}
 			int i = list_index(fm, lr, y);
 			if (i < 0) {
-				for (int k = 0; k < fm->n; k++)
-					fm->ents[k].sel = 0;
+				/* empty space: drag a box to select (Ctrl: add to what's selected) */
+				for (int k = 0; k < fm->n; k++) {
+					if (!(buttons & MOD_CTRL))
+						fm->ents[k].sel = 0;
+					fm->ents[k].was = fm->ents[k].sel;
+				}
+				fm->mode = FMM_BAND;
+				fm->bx0 = fm->bx1 = x;
+				fm->by0 = fm->by1 = y + fm->lsb.pos;
 			} else if (buttons & MOD_CTRL) {
 				fm->ents[i].sel = !fm->ents[i].sel;
 				fm->cursor = fm->anchor = i;
@@ -1126,6 +1269,23 @@ static void fm_mouse(struct win *w, int type, int x, int y, int buttons, int dbl
 				}
 				kfree(paths);
 			}
+		} else if (fm->mode == FMM_BAND) {
+			x = MAX(lr.x + 2, MIN(x, lr.x + lr.w - 3));
+			y = MAX(lr.y + 2, MIN(y, lr.y + lr.h - 3));
+			/* past the edge: scroll */
+			if (y <= lr.y + 2)
+				fm->lsb.pos -= ROW_H;
+			else if (y >= lr.y + lr.h - 3)
+				fm->lsb.pos += ROW_H;
+			sb_clamp(&fm->lsb);
+			fm->bx1 = x;
+			fm->by1 = y + fm->lsb.pos;
+			int top = MIN(fm->by0, fm->by1) - lr.y - 2, bot = MAX(fm->by0, fm->by1) - lr.y - 2;
+			for (int k = 0; k < fm->n; k++) {
+				int in = k * ROW_H + ROW_H > top && k * ROW_H <= bot && strcmp(fm->ents[k].st.name, "..");
+				fm->ents[k].sel = fm->ents[k].was || in;
+			}
+			fm_render(w);
 		} else if (fm->mode == FMM_TREE_SB) {
 			if (sb_mouse(&fm->tsb, EV_MOVE, x, y, 0))
 				fm_render(w);
@@ -1153,7 +1313,7 @@ static void fm_context(struct win *w, int x, int y)
 	struct fm *fm = FM(w);
 	struct rect tr = tree_rect(w), lr = list_rect(w);
 	int sx = w->x + CLIENT_X + x, sy = w->y + CLIENT_Y + y;
-	struct menu_item it[16];
+	struct menu_item it[20];
 	int n = 0;
 #define ADD(l, f, i) menu_put(it, &n, l, f, i)
 	if (rect_has(lr, x, y)) {
@@ -1171,15 +1331,22 @@ static void fm_context(struct win *w, int x, int y)
 			if (!dir)
 				ADD("Edit", 0, FM_EDIT);
 			ADD("", MI_SEP, 0);
-			ADD("Copy...\tF8", 0, FM_COPY);
-			ADD("Move...\tF7", 0, FM_MOVE);
+			ADD("Cut\tCtrl+X", 0, FM_CUT);
+			ADD("Copy\tCtrl+C", 0, FM_CLIPCOPY);
+			if (dir && nsel == 1)
+				ADD("Paste Into Folder", clip.n ? 0 : MI_DISABLED, FM_PASTE_INTO);
+			ADD("", MI_SEP, 0);
+			ADD("Copy To...\tF8", 0, FM_COPY);
+			ADD("Move To...\tF7", 0, FM_MOVE);
 			ADD("Rename...\tF2", nsel == 1 ? 0 : MI_DISABLED, FM_RENAME);
 			ADD("Delete...\tDel", 0, FM_DELETE);
 			ADD("", MI_SEP, 0);
 			ADD("Properties...", nsel == 1 ? 0 : MI_DISABLED, FM_PROPS);
 		} else {
+			ADD("Paste\tCtrl+V", clip.n ? 0 : MI_DISABLED, FM_PASTE);
+			ADD("", MI_SEP, 0);
 			ADD("New Folder...\tCtrl+N", 0, FM_MKDIR);
-			ADD("Select All", 0, FM_SELALL);
+			ADD("Select All\tCtrl+A", 0, FM_SELALL);
 			ADD("Refresh\tF5", 0, FM_REFRESH);
 			ADD("", MI_SEP, 0);
 			ADD("Up a Folder\tBksp", strlen(fm->dir) > 3 ? 0 : MI_DISABLED, FM_UP);
@@ -1267,6 +1434,11 @@ static void fm_key(struct win *w, int k)
 	} else if (k == 1) {	/* Ctrl-A */
 		fm_pick(w->wm, w, FM_SELALL);
 		return;
+	} else if (k == 24 || k == 3) {	/* Ctrl-X, Ctrl-C */
+		clip_take(fm, k == 24);
+	} else if (k == 22) {		/* Ctrl-V */
+		clip_paste(fm, fm->dir);
+		return;
 	}
 	if (fm_alive(w->wm, w))
 		fm_render(w);
@@ -1312,8 +1484,20 @@ static void fm_destroy(struct win *w)
 	w->priv = NULL;
 }
 
+static void fm_wheel(struct win *w, int x, int y, int clicks)
+{
+	struct fm *fm = w->priv;
+	if (!fm)
+		return;
+	struct scrollbar *sb = rect_has(tree_rect(w), x, y) ? &fm->tsb : &fm->lsb;
+	sb->pos -= clicks * 3 * ROW_H;
+	sb_clamp(sb);
+	fm_render(w);
+}
+
 static const struct winops fm_ops = {
 	.key = fm_key,
+	.wheel = fm_wheel,
 	.mouse = fm_mouse,
 	.context = fm_context,
 	.resized = fm_render,
@@ -1328,7 +1512,7 @@ struct win *open_files(struct wm *wm, const char *dir)
 	struct fm *fm = kzalloc(sizeof *fm);
 	if (!fm)
 		return NULL;
-	fm->mb = (struct menubar){ fm_menus, 2, -1 };
+	fm->mb = (struct menubar){ fm_menus, 3, -1 };
 	fm->details = 1;
 	fm->tsb.vertical = fm->lsb.vertical = 1;
 	char canon[VFS_PATH_MAX];

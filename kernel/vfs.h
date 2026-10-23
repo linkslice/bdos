@@ -29,6 +29,8 @@ enum {
 	E_NOTEMPTY = -7, E_INVAL = -8, E_IO = -9, E_CORRUPT = -10,
 	E_NAMETOOLONG = -11, E_ACCES = -12, E_NOMEM = -13,
 	E_BADDRIVE = -20, E_NOTSUP = -21, E_XDEV = -22,
+	E_BADF = -23, E_NFILE = -24, E_NOSYS = -25, E_TIMEDOUT = -26,
+	E_REFUSED = -27, E_RESET = -28, E_NOHOST = -29, E_NONET = -30,
 };
 
 struct vstat {
@@ -79,6 +81,15 @@ struct vfile;
 
 int vfs_mount(char letter, const struct vfs_ops *ops, void *ctx, const char *desc);
 int vfs_unmount(char letter);
+/* SUBST X: target (NULL: undo it); what X: stands for, or NULL */
+int vfs_subst(char letter, const char *target);
+const char *vfs_subst_target(char letter);
+/* bdosfs volumes the installer makes */
+struct blkdev;
+int vfs_mount_bdos(char letter, struct blkdev *b, uint64_t start, uint64_t sectors, const char *what);
+int vfs_format_bdos(struct blkdev *b, uint64_t start, uint64_t sectors, const char *label);
+int vfs_eject(char letter);
+struct blkdev *vfs_drive_disk(char letter);
 struct vfs_drive *vfs_drive(char letter);
 void vfs_drives(void (*cb)(struct vfs_drive *d, void *arg), void *arg);
 void dev_register(struct chardev *d);

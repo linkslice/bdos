@@ -13,7 +13,8 @@
 
 static int shift, caps, ctrl, alt, extended;
 static int mouse_ok;
-static uint8_t mpkt[3];
+static uint8_t mpkt[4];
+static int mwheel;		/* an IntelliMouse: four-byte packets, the wheel in the fourth */
 static int mcount;
 
 static const char map_lo[128] = {
@@ -40,6 +41,7 @@ static void kbd_byte(uint8_t sc)
 {
 	if (sc == 0xFA || sc == 0xFE || sc == 0xEE || sc == 0x00 || sc == 0xFF)
 		return;		/* acks and controller noise */
+	input_raw(sc);
 	if (sc == 0xE0) {
 		extended = 1;
 		return;
@@ -115,7 +117,7 @@ static void kbd_byte(uint8_t sc)
 		PRESS(toupper(c) - '@');	/* ^C = 3 and friends */
 		return;
 	}
-	if (alt && letter) {
+	if (alt && (letter || c == ' ')) {	/* Alt+Space: the control menu */
 		PRESS(KEY_ALT | tolower(c));
 		return;
 	}
@@ -127,9 +129,11 @@ static void mouse_byte(uint8_t b)
 	if (mcount == 0 && !(b & 0x08))
 		return;		/* out of sync: bit 3 is always set in byte 0 */
 	mpkt[mcount++] = b;
-	if (mcount < 3)
+	if (mcount < (mwheel ? 4 : 3))
 		return;
 	mcount = 0;
+	if (mwheel)
+		input_wheel(-(int)(int8_t)(mpkt[3] << 4) / 16);	/* 4 signed bits */
 	int dx = mpkt[1] - ((mpkt[0] & 0x10) ? 256 : 0);
 	int dy = mpkt[2] - ((mpkt[0] & 0x20) ? 256 : 0);
 	if (mpkt[0] & 0xC0)	/* overflow: drop */
@@ -209,6 +213,7 @@ static void vmmouse_drain(void)
 		if (r.a & 0x08)
 			b |= 4;		/* middle */
 		input_mouse_abs((int)(r.b & 0xFFFF), (int)(r.c & 0xFFFF), b);
+		input_wheel(-(int)(int8_t)(r.d & 0xFF));	/* the wheel: up is negative here */
 	}
 }
 
@@ -280,8 +285,19 @@ void ps2_init(void)
 	outb(DATA, cfg);
 
 	ctl_cmd(0xA8);			/* enable the aux (mouse) port */
-	if (mouse_cmd(0xF6) == 0xFA && mouse_cmd(0xF4) == 0xFA)	/* defaults, stream on */
-		mouse_ok = 1;
+	if (mouse_cmd(0xF6) == 0xFA) {	/* defaults */
+		/* the IntelliMouse knock: sample rates 200, 100, 80, then its ID says 3 */
+		static const uint8_t knock[] = { 200, 100, 80 };
+		int ok = 1;
+		for (int i = 0; i < 3 && ok; i++)
+			ok = mouse_cmd(0xF3) == 0xFA && mouse_cmd(knock[i]) == 0xFA;
+		if (ok && mouse_cmd(0xF2) == 0xFA && wait_read() && inb(DATA) == 3)
+			mwheel = 1;
+		mouse_cmd(0xF3);
+		mouse_cmd(100);
+		if (mouse_cmd(0xF4) == 0xFA)	/* stream on */
+			mouse_ok = 1;
+	}
 	if (mouse_ok)
 		vmmouse_on = vmmouse_init();
 	for (int i = 0; i < 64 && (inb(STATUS) & 1); i++)
@@ -300,4 +316,12 @@ int input_mods(void)
 int ps2_mouse_present(void)
 {
 	return mouse_ok;
+}
+
+/* a set 1 scancode from somewhere else - a USB keyboard - handled as if it came from here */
+void keyboard_scancode(uint8_t sc)
+{
+	uint64_t f = irq_save();
+	kbd_byte(sc);
+	irq_restore(f);
 }

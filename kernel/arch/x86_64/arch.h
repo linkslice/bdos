@@ -9,6 +9,9 @@
 
 #define ARCH_NAME	"x86-64"
 #define PAGE_SIZE	4096UL
+#define ARCH_KVA_OFFSET	0ULL		/* physical memory is identity mapped */
+#define P2V(pa)		((void *)(uint64_t)(pa))
+#define V2P(va)		((uint64_t)(va))
 
 static inline void outb(uint16_t port, uint8_t v)
 {
@@ -92,15 +95,63 @@ static inline void mmio_barrier(void)
 	__asm__ volatile("mfence" ::: "memory");
 }
 
-/* Saved by arch_switch(); everything else is caller-saved in SysV. */
+/* Saved by arch_switch(): the stack (callee-saved registers are on it) and
+ * the x87/SSE state, since a task can be preempted mid-calculation. */
 struct arch_context {
 	uint64_t rsp;
-};
+	uint64_t _pad;
+	uint8_t fx[512];	/* fxsave image */
+} __attribute__((aligned(16)));
+static inline void arch_fpu_clean(void *fx)
+{
+	__asm__ volatile("fxsave %0" : "=m"(*(uint8_t (*)[512])fx));
+}
+
+/* ---- multiprocessor support -------------------------------------------- */
+#define VEC_TIMER	0xF0	/* each core's local APIC timer */
+#define VEC_KICK	0xF1	/* wake a halted core */
+#define VEC_HALT	0xF2	/* stop: another core panicked */
+
+#define MAX_CPUS 64
+struct cpu;
+/* The current core's struct cpu: GS points at it, and its first word is itself. */
+static inline struct cpu *this_cpu(void)
+{
+	struct cpu *c;
+	__asm__ volatile("mov %%gs:0, %0" : "=r"(c));
+	return c;
+}
+void arch_cpu_local(struct cpu *c);	/* this core's GS, GDT and TSS */
+int arch_smp_init(void);		/* start the other cores; returns how many run */
+void arch_halt_others(void);		/* panic: stop every other core */
+void arch_kick_cpu(int cpu);		/* wake a halted core early */
 
 void arch_init(const void *bootinfo);	/* GDT, IDT, paging, PIC, timer */
 void arch_switch(struct arch_context *from, struct arch_context *to);
 void arch_task_setup(struct arch_context *ctx, void *stack_top,
     void (*entry)(void));
+void arch_set_kstack(void *top);	/* where interrupts from user mode land */
+
+/* ---- user mode: address spaces, ring 3, system calls ---------------------- */
+#define USER_BASE	0x0000008000000000ULL	/* 512 GB: everything below is the kernel's */
+#define USER_TOP	0x00007FFFFFFFF000ULL
+#define VM_WRITE	1
+#define VM_EXEC		2
+void *arch_as_new(void);			/* a new address space, kernel included */
+int arch_as_map(void *as, uint64_t va, uint64_t pa, int flags);	/* one 4 KB page */
+void *arch_map_mmio(uint64_t pa, uint64_t size);	/* device registers, wherever they are */
+uint64_t arch_as_lookup(void *as, uint64_t va);	/* its physical page, or 0 */
+uint64_t arch_as_unmap(void *as, uint64_t va);	/* returns the page it held */
+void arch_as_free(void *as);			/* page tables and every page mapped */
+void arch_as_switch(void *as);			/* NULL: the kernel's own */
+void arch_set_fs_base(uint64_t base);
+_Noreturn void arch_enter_user(uint64_t rip, uint64_t rsp, uint64_t a0, uint64_t a1);
+void arch_syscall_init(void);			/* on every core */
+
+struct sysframe {
+	uint64_t r15, r14, r13, r12, rbp, rbx, r9, r8, r10, rdx, rsi, rdi, rax;
+	uint64_t rip, rflags, rsp;
+};
 _Noreturn void arch_reboot(void);
 _Noreturn void arch_halt(void);		/* interrupts off, stop for good */
 /* PCI configuration space (mechanism #1 on PCs; the Bonito bridge on a Yeeloong) */
@@ -108,7 +159,8 @@ uint32_t arch_pci_read32(int bus, int slot, int func, uint8_t off);
 void arch_pci_write32(int bus, int slot, int func, uint8_t off, uint32_t v);
 void arch_rtc(int *y, int *mo, int *d, int *h, int *mi, int *s);
 void arch_rtc_set(int y, int mo, int d, int h, int mi, int s);
-void arch_cpu_name(char *out, int n);	/* "Intel(R) Core(TM)..." or similar */
+void arch_cpu_name(char *out, int n);
+void arch_speaker(uint32_t hz);		/* the PC speaker: a tone, or 0 for quiet */	/* "Intel(R) Core(TM)..." or similar */
 
 /* Non-local exits for the language interpreters */
 struct arch_jmpbuf {

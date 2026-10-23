@@ -21,6 +21,9 @@
 #include "../vfs.h"
 #include "../sysapi.h"
 #include "fmath.h"
+#include "../gate.h"
+
+static int cint_run_file_unlocked(const char *path, int argc, char **argv);
 
 #define MEMSZ		(8u << 20)
 #define STACKSZ		(1u << 20)
@@ -3064,7 +3067,7 @@ static void declare_builtins(struct cint *c)
 
 /* ---- running ------------------------------------------------------------------------------ */
 
-int cint_run_file(const char *path, int argc, char **argv)
+static int cint_run_file_unlocked(const char *path, int argc, char **argv)
 {
 	struct cint *c = kzalloc(sizeof *c);
 	if (!c) {
@@ -3163,4 +3166,15 @@ int cint_run_file(const char *path, int argc, char **argv)
 	kfree(c->mtoks);
 	kfree(c);
 	return rc;
+}
+
+/* The interpreter runs without the big kernel lock: on any core, in
+ * parallel with everything else. Kernel calls go through gate.h. */
+
+int cint_run_file(const char *path, int argc, char **argv)
+{
+	int held = bkl_release_all();
+	int r = cint_run_file_unlocked(path, argc, argv);
+	bkl_reacquire(held);
+	return r;
 }

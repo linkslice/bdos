@@ -1,0 +1,6 @@
+@ECHO OFF
+REM BUSY.BAT - one SPIN per core for 20 seconds. Open Pulse to watch.
+START \DEMOS\SPIN.C 20
+START \DEMOS\SPIN.C 20
+START \DEMOS\SPIN.C 20
+START \DEMOS\SPIN.C 20

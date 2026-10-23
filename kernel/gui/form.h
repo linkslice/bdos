@@ -40,6 +40,7 @@ enum {
 	FE_TICK,	/* the timer asked for with form_tick() */
 	FE_RESIZE,	/* the window was resized (form_size() has the new size) */
 	FE_CLOSE,	/* the window is closing (id -1) */
+	FE_RCLICK,	/* a custom area was right-clicked (form_point says where) */
 };
 
 typedef void (*form_fn)(struct form *f, int id, int ev);
@@ -73,15 +74,27 @@ void form_set_rgb(struct form *f, int id, uint32_t rgb);
 uint32_t form_rgb(struct form *f, int id);
 void form_list_clear(struct form *f, int id);
 void form_list_add(struct form *f, int id, const char *line);
+int form_list_top(struct form *f, int id);		/* the first line showing */
+void form_list_set_top(struct form *f, int id, int top);
+int form_list_rows(struct form *f, int id);		/* how many lines show */
+int form_list_count(struct form *f, int id);
 
 void form_tick(struct form *f, int ms);	/* FE_TICK every ms (0 = off) */
 void form_resizable(struct form *f, int min_w, int min_h);
 void form_size(struct form *f, int *w, int *h);
 void form_point(struct form *f, int *x, int *y);	/* last click, widget-relative */
+int form_buttons(struct form *f);			/* and its buttons and Shift/Ctrl (MOD_ bits) */
+void form_pointer(struct form *f, int *x, int *y);	/* the pointer now, window-relative (maybe outside) */
+int form_is_active(struct form *f);			/* the window has the keyboard */
+int form_is_minimized(struct form *f);
+/* keys first: fn returns 1 when it used the key (Esc still closes unless it does) */
+void form_key_hook(struct form *f, int (*fn)(struct form *f, int key));
 void form_redraw(struct form *f);
 void *form_priv(struct form *f);
 struct wm *form_wm(struct form *f);
 void form_title(struct form *f, const char *title);
+void form_icon_name(struct form *f, const char *icon);	/* when minimized */
+void form_icon_draw(struct form *f, void (*fn)(struct form *f, struct surface *s, int x, int y));
 
 /* the desktop side, for applets */
 void wm_launch(struct wm *wm, const char *label, const char *cmd);

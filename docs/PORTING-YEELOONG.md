@@ -1,11 +1,52 @@
 # Porting bdos to the Lemote Yeeloong 8089B (MIPS64)
 
-Status: **not started on hardware.** Nothing here has been run on a Yeeloong.
-This is the plan, plus the cleanup already done on the x86-64 side so the
-port is a new `kernel/arch/mips64/` directory and a handful of drivers rather
-than a rewrite. Items marked *(verify)* are from memory of the platform and
-should be checked against the hardware or the Linux `arch/mips/loongson64`
-sources before relying on them.
+Status: **boots to `C:\>` on QEMU's Fuloong 2E** (Loongson 2E, the Yeeloong's
+older sibling: same Bonito bridge, same ISA window), on the serial port, with
+C: as a RAM disk. The shell, batch files, BASIC, the C interpreter, the DOS
+emulator (8086 through 486, no FPU) and preemptive tasks all run there.
+**Nothing has been run on a real Yeeloong yet.**
+
+```
+make mips          # build-mips64/KERNEL.SYS: a MIPS64 ELF for PMON or QEMU
+make run-mips      # QEMU fuloong2e, C: from build/ROOTFS.IMG, serial on stdio
+make mipstest      # the MIPS test suite
+```
+
+What the port is (`kernel/arch/mips64/`):
+
+- `entry.S`: PMON's entry (a0..a2 = argc, argv, envp as 32-bit pointers), the
+  exception entry (saves a frame, drops EXL so the C handler is an ordinary
+  kernel context that may switch tasks), `arch_switch` (callee-saved
+  registers, Status.IE and all 32 FPU registers), setjmp/longjmp.
+- `cpu.c`: the boot info from PMON's `memsize=` and QEMU/PMON's
+  `rd_start=`/`rd_size=`; the 16550 at ISA 3F8h and the MC146818 at 70h
+  through the Bonito I/O window (KSEG1 0xbfd00000); the 1 kHz tick from CP0
+  Count/Compare, its rate measured against the RTC at boot; one core.
+- Everything runs in KSEG0, so physical memory is at 0xffffffff80000000;
+  `P2V`/`V2P` in `arch.h` translate (they're the identity on x86).
+
+Not done yet, in the order the Yeeloong needs them:
+
+1. **Display.** The console wants a 32-bpp framebuffer; the SM712 runs at
+   16 bpp, so `console.c` needs a 16-bpp path, and the SM712's address has to
+   come from PCI.
+2. **PCI.** `arch_pci_read32` is wired to the Bonito's configuration window
+   but switched off (`pci_on`): the slot-to-IDSEL mapping differs between
+   boards and a wrong guess is a bus error. Check it against Linux's
+   `arch/mips/loongson64` on the hardware first. The PCI drivers also hand
+   devices virtual addresses for DMA; they need `V2P()` before any of them
+   (RTL8139 doesn't exist yet anyway) is used on MIPS.
+3. **Keyboard.** `ps2_init` is a stub; the x86 i8042 code works through the
+   same ISA window, polled, once someone confirms the EC behaves like one.
+4. **Interrupts** from the southbridge's 8259s (Cause IP2 through the Bonito):
+   only the CP0 timer is enabled now; drivers poll.
+5. **Loongson 2F errata.** clang's assembler has no `-mfix-loongson2f-nop` or
+   `-mfix-loongson2f-jump`; a real 2F build should use GNU as for those (see
+   below). QEMU doesn't model the errata.
+
+Not coming to MIPS: native 64-bit programs and TCC (they're x86-64 code), and
+the DOS box's x87 (on x86 it runs on the real x87; here the box simply has no
+coprocessor).
 
 ## The machine
 

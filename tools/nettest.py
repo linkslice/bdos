@@ -79,6 +79,16 @@ try:
         box1.cmd("dir E:", "Invalid drive")
     check("NET USE E: \\\\BOX2\\C", netuse)
 
+    def cpu():
+        # one command on the CPU server, run from our directory (its T:)
+        box1.cmd("cpu \\\\box2 type mine.txt", "this file lives on BOX1", timeout=20)
+        box1.cmd("cpu \\\\box2 type C:\\WHOAMI.TXT", "this file lives on BOX2", timeout=20)
+        box1.cmd("control net.cpu=\\\\box2")
+        box1.cmd("cpu type CPU$", "cores", timeout=20)
+        box1.cmd("cpu \\\\box2 echo made on BOX2 > made.txt", timeout=20)
+        box1.cmd("type made.txt", "made on BOX2")
+    check("CPU \\\\BOX2 command", cpu)
+
     def remote_desktop():
         box1.cmd("cd \\")
         start = len(box1.log)

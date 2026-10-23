@@ -18,11 +18,13 @@ BFS_SECTORS=$((SIZE_MB * 2048 - BFS_START))
 rm -f "$OUT"
 dd if=/dev/zero of="$OUT" bs=1M count=0 seek=$SIZE_MB status=none
 
-python3 - "$OUT" $ESP_START $ESP_SECTORS $BFS_START $BFS_SECTORS <<'PY'
+python3 - "$OUT" $ESP_START $ESP_SECTORS $BFS_START $BFS_SECTORS "$B/mbrboot.bin" <<'PY'
 import struct, sys
 path = sys.argv[1]
-a, an, b, bn = map(int, sys.argv[2:])
+a, an, b, bn = map(int, sys.argv[2:6])
 mbr = bytearray(512)
+code = open(sys.argv[6], "rb").read()       # a BIOS hears that this needs UEFI
+mbr[:len(code)] = code
 def entry(ptype, start, count):
     return struct.pack("<B3sB3sII", 0, b"\xfe\xff\xff", ptype, b"\xfe\xff\xff", start, count)
 mbr[446:462] = entry(0xEF, a, an)

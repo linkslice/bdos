@@ -18,6 +18,8 @@ int setting_set(const char *key, const char *val);	/* saves and notifies */
 int setting_set_int(const char *key, long v);
 /* fn(key) runs after each change ("" once at registration: apply everything) */
 void setting_watch(void (*fn)(const char *key));
+/* write the settings, with keys[i]=vals[i] instead, to another SETTINGS.INI */
+int settings_write_to(const char *path, const char *const *keys, const char *const *vals, int n);
 
 /* the real-time clock */
 int clock_valid(int y, int mo, int d, int h, int mi, int s);

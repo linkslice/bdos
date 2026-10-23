@@ -26,7 +26,7 @@ class VM:
         vars_copy = os.path.join(tmp, name + ".vars")
         shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", vars_copy)
         self.proc = subprocess.Popen([
-            "qemu-system-x86_64", "-machine", "q35", "-m", "256M",
+            "qemu-system-x86_64", "-machine", "q35", "-m", "256M", "-smp", os.environ.get("SMP", "4"),
             "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
             "-drive", f"if=pflash,format=raw,file={vars_copy}",
             "-drive", f"format=raw,file={disk}",
@@ -144,6 +144,13 @@ class VM:
     def button(self, down, which="left"):
         self._input({"type": "btn", "data": {"down": bool(down), "button": which}})
 
+    def wheel(self, clicks):
+        """+ up (away from you), - down"""
+        b = "wheel-up" if clicks > 0 else "wheel-down"
+        for _ in range(abs(clicks)):
+            self.button(1, b)
+            self.button(0, b)
+
     def rclick(self):
         self.button(1, "right")
         self.button(0, "right")
@@ -160,8 +167,11 @@ class VM:
         wins = {}
         self.minimized = set()
         self.focus = None
-        for m in re.finditer(r'window (\d+) (-?\d+) (-?\d+) (\d+) (\d+)((?: [a-z]+)*) "([^"]*)"', out):
+        self.back = {}
+        for m in re.finditer(r'window (\d+) (-?\d+) (-?\d+) (\d+) (\d+)((?: [a-z0-9]+)*) "([^"]*)"', out):
             wins[m.group(7)] = tuple(map(int, m.groups()[1:5]))
+            b = re.search(r"back (\d+)", m.group(6))
+            self.back[m.group(7)] = int(b.group(1)) if b else 0
             if "minimized" in m.group(6):
                 self.minimized.add(m.group(7))
             if "focus" in m.group(6):
@@ -221,7 +231,10 @@ def check(name, fn, *args):
         print(f"ok    {name}")
     except AssertionError as e:
         failed += 1
-        print(f"FAIL  {name}\n{e}\n")
+        import traceback
+        tb = traceback.extract_tb(e.__traceback__)
+        where = " / ".join(f"{f.name}:{f.lineno}" for f in tb[1:])
+        print(f"FAIL  {name}  ({where})\n{e}\n")
 
 
 def suite(name):
@@ -232,7 +245,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.10" in out, out
+    assert "bdos 0.11" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -240,7 +253,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.10 (x86-64)")
+    vm.cmd("ver", "bdos version 0.11 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -387,7 +400,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.10", 10, start)
+    vm.wait_for("bdos version 0.11", 10, start)
 
 
 def t_basic(vm):
@@ -548,6 +561,7 @@ def t_dos(vm):
     vm.cmd("fileio", ["File written and read back by a DOS program.", "DOSTEST.TXT"])
     vm.cmd("echo %ERRORLEVEL%", "7")
     vm.cmd("type dostest.txt", "File written and read back")      # visible to bdos
+    vm.cmd("envpath", ["ENVPATH var: PATH=", "ENVPATH self: C:\\DOSAPPS\\ENVPATH.COM"])
     vm.cmd("helloexe", "Hello from an .EXE with relocations!")
     vm.cmd("echo %ERRORLEVEL%", "5")
     start = len(vm.log)
@@ -560,6 +574,168 @@ def t_dos(vm):
     vm.screenshot("07-dos-box")
     vm.cmd("cls")
     vm.cmd("cd \\")
+    # SUBST: a folder as A:, for installers that want a floppy
+    vm.cmd("subst a: c:\\dosapps")
+    vm.cmd("subst", "A: => C:\\DOSAPPS")
+    vm.cmd("a:")
+    vm.cmd("dir hello.com", "HELLO")
+    vm.cmd("hello from a", "Command tail:[ from a]")
+    vm.cmd("c:")
+    vm.cmd("drives", "A:")
+    vm.cmd("subst a: /d")
+    vm.cmd("dir a:", absent="HELLO")
+    vm.cmd("subst c: c:\\bin", "C: is a drive already")
+
+
+def t_dos2(vm):
+    vm.cmd("cd \\dosapps")
+    vm.cmd("cpu486", ["GenuineIntel", "CPU486 OK"])
+    vm.cmd("fpu", "FPU OK")
+    out = vm.cmd("timer", "TIMER: interrupts in 18 ticks:", timeout=30)
+    n = int(re.search(r"18 ticks: (\d+)", out).group(1))
+    assert 850 <= n <= 1150, f"timer ran at {n}/s"
+    vm.cmd("xms", "round trip through extended memory OK")
+    # pacing: the same program, held to an AT's speed, then flat out
+    vm.cmd("control dos.speed=xt")
+    t0 = time.time()
+    vm.cmd("primes", "1229 primes", timeout=120)
+    slow = time.time() - t0
+    vm.cmd("control dos.speed=max")
+    t0 = time.time()
+    vm.cmd("primes", "1229 primes", timeout=60)
+    fast = time.time() - t0
+    vm.cmd("control dos.speed=486")
+    assert slow > fast * 3, f"XT pace {slow:.1f}s vs flat out {fast:.1f}s"
+    vm.cmd("parent", ["Hello from 16-bit DOS on bdos!", "Command tail:[ from mum]",
+                      "child exit code 0", "bdos version", "back from COMMAND.COM"])
+    # a hooked INT 9 sees make and break codes
+    start = len(vm.log)
+    vm.send("kbdhook\r")
+    vm.wait_for("Esc to stop", 10, start)
+    vm.send("a")
+    time.sleep(0.5)
+    vm.send("\x1b")
+    out = vm.settle(start, 15)
+    assert "1E 9E" in out and "01 81" in out, out
+    # saved states: count to 3, save, count on, go back, carry on
+    start = len(vm.log)
+    vm.send("counter\r")
+    vm.wait_for("q to quit", 10, start)
+    for _ in range(3):
+        vm.send("a")
+        time.sleep(0.3)
+    vm.wait_for("count 3", 10, start)
+    vm.keys("ctrl-alt-f11")
+    time.sleep(1.5)
+    for _ in range(2):
+        vm.send("a")
+        time.sleep(0.3)
+    vm.wait_for("count 5", 10, start)
+    vm.keys("ctrl-alt-f12")
+    time.sleep(1.5)
+    vm.send("a")
+    vm.wait_for("count 4", 10, start)
+    vm.send("q")
+    vm.wait_for("COUNTER final 4", 10, start)
+    vm.settle(start)
+    vm.cmd("dir \\bdos\\states", "COUNTER.BST")
+    start = len(vm.log)
+    vm.send("resume counter\r")
+    time.sleep(2)
+    vm.send("q")
+    vm.wait_for("COUNTER final 3", 15, start)
+    vm.settle(start)
+    vm.cmd("cd \\")
+
+
+def t_dosfull(vm):
+    # no desktop: graphics take the whole screen, and give it back
+    vm.cmd("cd \\dosapps")
+    start = len(vm.log)
+    vm.send("mode13\r")
+    time.sleep(3)
+    vm.screenshot("26-mode13-full")
+    vm.keys("spc")
+    vm.wait_for("MODE13 done", 15, start)
+    time.sleep(0.5)
+    vm.cmd("ver", "bdos version")
+    vm.screenshot("27-after-full")
+    vm.cmd("cd \\")
+
+
+def t_dosgfx(vm):
+    vm.cmd("cd \\dosapps")
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")
+    vm.wait_for("C:\\", 15, start)
+    time.sleep(0.5)
+    vm.cmd("cd \\dosapps")
+    for prog, shot in (("mode13", "22-mode13"), ("planar", "23-planar"), ("modex", "24-modex")):
+        start = len(vm.log)
+        vm.send(prog + "\r")
+        time.sleep(3)
+        vm.screenshot(shot)
+        vm.keys("spc")                          # the window has the keys now
+        vm.wait_for(prog.upper() + " done", 15, start)
+        time.sleep(0.5)
+    # the mouse: click in the middle of the window, then the right button ends it
+    start = len(vm.log)
+    vm.send("mouse\r")
+    time.sleep(3)
+    wins, _ = (None, None)
+    vm.point(420, 280)
+    time.sleep(0.4)
+    vm.click()
+    time.sleep(0.5)
+    vm.screenshot("25-mouse")
+    vm.button(1, "right")
+    vm.button(0, "right")
+    vm.wait_for("MOUSE: clicked at", 15, start)
+    time.sleep(0.5)
+    # quick clicks, the press and release together, while a "game" is busy:
+    # its event handler still sees the button down, and so does polling
+    start = len(vm.log)
+    vm.send("clicks\r")
+    time.sleep(4)
+    vm.point(420, 280)
+    for _ in range(2):
+        time.sleep(1.5)
+        vm.button(1)                    # (QEMU merges a press and release sent together)
+        vm.button(0)
+    time.sleep(3)
+    vm.button(1, "right")
+    vm.button(0, "right")
+    vm.wait_for("polling saw", 60, start)
+    time.sleep(0.5)
+    out = vm.text(start)
+    m = re.search(r"down (\d+) of (\d+), polling saw (\d+)", out)
+    assert m and m.group(1) == m.group(2) == "2" and int(m.group(3)) >= 1, out[-300:]
+    # a game's keyboard and mouse: INT 9 sees a key held for 1.5 s as held,
+    # and with its range set to 0..319 the mouse is where the pointer is
+    wins, _ = vm.windows()
+    sx, sy, _, _ = wins["Shell"]
+    start = len(vm.log)
+    vm.send("keyhold\r")
+    time.sleep(3)
+    vm.mon("sendkey a 1500")
+    time.sleep(2.5)
+    vm.point(sx + 4 + 480, sy + 24 + 300)          # 3/4 across, 3/4 down of 640x400
+    time.sleep(0.4)
+    vm.click()
+    vm.keys("esc")
+    vm.wait_for("KEYHOLD mouse", 15, start)
+    out = vm.settle(start)
+    n = int(re.search(r"1E=(\d+)", out).group(1))
+    assert 20 <= n <= 35, out
+    assert "KEYHOLD mouse: 240,150" in out, out
+    assert re.search(r"events [1-9]", out), out          # its event handler ran, and returned
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("cd \\")
 
 
 def t_desktop(vm):
@@ -571,7 +747,7 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.10")
+    vm.cmd("ver", "bdos version 0.11")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
@@ -604,7 +780,7 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.10")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.11")              # back at the full-screen prompt
 
 
 def t_win31(vm):
@@ -658,15 +834,62 @@ def t_win31(vm):
     vm.point(400, 220)
     time.sleep(0.3)
     vm.button(1)
-    for x, y in ((390, 225), (300, 300), (150, 380), (60, 400)):
+    for x, y in ((390, 225), (300, 300), (150, 400), (60, 440)):
         vm.point(x, y)
         time.sleep(0.1)
     vm.screenshot("13b-dragging")
     vm.button(0)
     time.sleep(1)
     shell_focus()
-    vm.cmd("type \\progman\\games\\one.lnk", 'EDIT "C:\\fmtest\\one.txt"')
-    vm.cmd("del \\progman\\games\\one.lnk")
+    # whichever group was under the pointer now has it
+    found = None
+    for g in ("Main", "Demos", "Games", "Network"):
+        out = vm.cmd(f"dir \\progman\\{g}")
+        if "one.lnk" in out:
+            found = g
+    assert found, "no group got one.lnk"
+    vm.cmd(f"type \\progman\\{found}\\one.lnk", 'EDIT "C:\\fmtest\\one.txt"')
+    vm.cmd(f"del \\progman\\{found}\\one.lnk")
+    # the clipboard: Ctrl+A, Ctrl+C, Ctrl+V into the same folder makes copies
+    fm_focus()
+    vm.keys("ctrl-a", "ctrl-c", "ctrl-v")
+    time.sleep(1.5)
+    shell_focus()
+    vm.cmd("dir \\fmtest", ["one (2).txt", "two (2).txt", "NEWDIR (2)"])
+    # a box dragged from the empty space up to the first file selects them all; Del
+    lx = fx + 4 + max(120, (fw - 8) * 35 // 100) + 4 + 40
+    ly = fy + 24 + 46 + 2
+    fm_focus()
+    vm.point(lx, ly + 7 * 18 + 30)
+    time.sleep(0.3)
+    vm.button(1)
+    for yy in (ly + 100, ly + 50, ly + 18 + 9):
+        vm.point(lx + 60, yy)
+        time.sleep(0.15)
+    vm.screenshot("13d-box-select")
+    vm.button(0)
+    time.sleep(0.3)
+    vm.keys("delete")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    shell_focus()
+    vm.cmd("dir \\fmtest", "0 file(s)", absent=["one.txt", "NEWDIR"])
+    # cut and paste: Ctrl+X a file, open a folder, Ctrl+V moves it in
+    vm.cmd("md \\fmtest\\sub")
+    vm.cmd("echo three > \\fmtest\\three.txt")
+    fm_focus()
+    vm.keys("f5", "end", "ctrl-x", "home", "down", "ret")
+    time.sleep(0.5)
+    vm.keys("ctrl-v")
+    time.sleep(1.5)
+    vm.keys("backspace")
+    time.sleep(0.5)
+    shell_focus()
+    vm.cmd("type \\fmtest\\sub\\three.txt", "three")
+    vm.cmd("dir \\fmtest", "sub", absent="three.txt")
+    vm.cmd("del \\fmtest\\sub\\three.txt")
+    vm.cmd("rd \\fmtest\\sub")
     # a desktop that follows the sun, and the Desktop applet that controls it
     vm.cmd("control desktop.theme=Sunrise to Sunset")
     vm.cmd("control list", "desktop.timeofday=1")
@@ -735,6 +958,341 @@ def t_win31(vm):
     vm.cmd("ver", "bdos version")
 
 
+def t_smp(vm):
+    want = int(os.environ.get("SMP", "4"))
+    out = vm.cmd("type CPU$", f"cores {want}")
+    vm.cmd("tasks", "Core")
+    if want < 2:
+        vm.cmd("echo off 0 > CPU$")
+        out = vm.cmd("type CPU$")                   # the last core stays on
+        assert re.search(r"cpu 0 load \d+ on", out), out
+        # one core: a program computing in the background is preempted,
+        # so the shell still answers straight away
+        start = len(vm.log)
+        vm.cmd("start \\demos\\spin.c 6", "Started task")
+        t0 = time.time()
+        vm.cmd("ver", "bdos version")
+        assert time.time() - t0 < 3, f"the shell took {time.time() - t0:.1f}s"
+        vm.wait_for("in 6 s", 30, start)
+        return
+    # four programs computing at once: several cores light up
+    start = len(vm.log)
+    for _ in range(4):
+        vm.cmd("start \\demos\\spin.c 8", "Started task")
+    time.sleep(4)
+    out = vm.cmd("type CPU$")
+    busy = [int(m) for m in re.findall(r"cpu \d+ load (\d+)", out)]
+    assert sum(1 for b in busy if b >= 50) >= 2, f"only {busy} busy:\n{out}"
+    vm.wait_for("in 8 s", 30, start)
+    time.sleep(2)
+    out = vm.text(start)
+    assert out.count("SPIN:") == 4, out
+    # park a core: it stops taking work
+    vm.cmd("echo off 1 > CPU$")
+    out = vm.cmd("type CPU$", "cpu 1 load")
+    assert re.search(r"cpu 1 load \d+ off", out), out
+    start = len(vm.log)
+    for _ in range(3):
+        vm.cmd("start \\demos\\spin.c 3", "Started task")
+    time.sleep(2)
+    out = vm.cmd("type CPU$")
+    assert re.search(r"cpu 1 load [0-9] off", out), out
+    vm.wait_for("in 3 s", 30, start)
+    time.sleep(2)
+    vm.cmd("echo on 1 > CPU$")
+    vm.cmd("type CPU$", "cpu 1 load")
+    # Pulse on the desktop, with the cores busy
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    for _ in range(3):
+        vm.cmd("start \\demos\\spin.c 6", "Started task")
+    vm.cmd("echo run @pulse > DESK$")
+    time.sleep(2.5)
+    vm.screenshot("20-pulse")
+    vm.point(300, 400)                              # inside the Shell: focus back
+    time.sleep(0.3)
+    vm.click()
+    wins, _ = vm.windows()
+    assert "Pulse" in wins, wins
+    # minimized, its icon keeps showing the bars
+    px, py, pw, ph = wins["Pulse"]
+    vm.point(px + pw - 4 - 45, py + 4 + 8)          # the minimize button
+    time.sleep(0.3)
+    vm.click()
+    time.sleep(1)
+    vm.screenshot("21-pulse-icon")
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
+
+
+def t_winkeys(vm):
+    """Windows 3.1 keyboard habits: Alt+Space, Move, Size; Program Manager remembers its place."""
+    def desktop():
+        start = len(vm.log)
+        vm.send("win\r")
+        time.sleep(3)
+        vm.send("\r")
+        vm.wait_for("C:\\>", 15, start)
+        time.sleep(0.5)
+    def leave():
+        vm.keys("alt-x")
+        time.sleep(0.8)
+        vm.keys("ret")
+        time.sleep(1.5)
+        vm.cmd("ver", "bdos version")
+    def focus(r):
+        vm.point(r[0] + r[2] - 90, r[1] + 8)    # a title bar, clear of the other window
+        time.sleep(0.3)
+        vm.click()
+    def where():
+        vm.point(shell[0] + shell[2] - 20, shell[1] + shell[3] - 20)  # COM1 types into the focused window
+        time.sleep(0.3)
+        vm.click()
+        return vm.windows()[0]["Program Manager"]
+    desktop()
+    wins, _ = vm.windows()
+    shell = wins["Shell"]
+    x, y, w, h = wins["Program Manager"]
+    focus((x, y, 200, h))
+    vm.keys("alt-spc", "m", "right", "right", "right", "right", "down", "ret")
+    time.sleep(0.8)
+    r = where()
+    assert r[:2] == (x + 32, y + 8), (r, (x, y))
+    focus((r[0], r[1], 200, h))
+    vm.keys("alt-spc", "s", "right", "right", "down", "ret")
+    time.sleep(0.8)
+    moved = where()
+    assert moved[2] >= w + 8 and moved[3] >= h + 8, (moved, (w, h))
+    # the menu bar: Alt+F, then right arrow walks to the next menu
+    focus((moved[0], moved[1], 200, h))
+    vm.keys("alt-f", "right")
+    time.sleep(0.5)
+    vm.screenshot("22-menu-arrows")
+    vm.keys("esc")
+    time.sleep(0.3)
+    leave()
+    desktop()
+    assert where() == moved, (where(), moved)
+    # put it back for everyone else
+    focus((moved[0], moved[1], 200, h))
+    vm.keys("alt-spc", "m", "left", "left", "left", "left", "up", "ret")
+    time.sleep(0.5)
+    vm.keys("alt-spc", "s", "left", "left", "up", "ret")
+    time.sleep(0.5)
+    assert where() == (x, y, w, h), (where(), (x, y, w, h))
+    leave()
+
+
+def t_termui(vm):
+    """Terminal windows: scrollback (wheel, Shift+PgUp), selecting and copying, pasting."""
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    wins, _ = vm.windows()
+    sx, sy, sw, sh = wins["Shell"]
+    vm.cmd("cls")
+    for i in range(40):
+        vm.send(f"echo scrolled line {i:02d}\r")
+        time.sleep(0.05)
+    vm.cmd("echo the end", "the end")
+    def looking_back(name):
+        """the yellow 'lines back' note at the top right of the Shell"""
+        vm.screenshot(name)
+        im = Image.open(os.path.join(OUT, name + ".png")).convert("RGB")
+        return any(im.getpixel((x, y)) == (255, 255, 85)
+                   for x in range(sx + sw - 260, sx + sw - 8, 2) for y in range(sy + 24, sy + 40, 2))
+    vm.point(sx + sw // 2, sy + sh // 2)   # the wheel over the Shell looks back
+    time.sleep(0.3)
+    assert not looking_back("40-live")
+    vm.wheel(4)
+    time.sleep(0.5)
+    assert looking_back("41-scrollback"), "the wheel didn't scroll back"
+    vm.wheel(-4)
+    time.sleep(0.5)
+    assert not looking_back("42-wheel-down"), "the wheel didn't come back"
+    vm.keys("shift-pgup")
+    time.sleep(0.5)
+    assert looking_back("43-shift-pgup"), "Shift+PgUp didn't scroll back"
+    vm.cmd("ver", "bdos version")          # typing comes back to now
+    assert not looking_back("44-typed")
+    # select the line at the top of the window with the mouse, copy it, show it
+    vm.cmd("cls")
+    vm.cmd("echo select me please")
+    cx, cy = sx + 4, sy + 24
+    vm.drag(cx + 8 * 18 + 4, cy + 16 + 8, cx - 2, cy + 16 + 8)   # right to left: the edge would resize
+    time.sleep(0.3)
+    vm.screenshot("45-selected")
+    vm.keys("ctrl-insert")
+    time.sleep(0.3)
+    vm.cmd("type CLIP$", "select me please")
+    # Shift+Insert pastes, as typing
+    vm.cmd("echo ver> CLIP$")
+    start = len(vm.log)
+    vm.keys("shift-insert")
+    vm.wait_for("bdos version", 10, start)
+    # right-click: the menu
+    vm.point(cx + 200, cy + 100)
+    time.sleep(0.3)
+    vm.rclick()
+    vm.screenshot("46-term-menu")
+    vm.keys("esc")
+    time.sleep(0.3)
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
+
+
+def t_applets(vm):
+    """The Startup group, item options, and the small programs."""
+    vm.cmd("echo CD> C:\\PROGMAN\\Startup\\Where.lnk")
+    vm.cmd("echo dir=C:\\BDOS>> C:\\PROGMAN\\Startup\\Where.lnk")
+    vm.cmd("echo @eyes> C:\\PROGMAN\\Startup\\Eyes.lnk")
+    vm.cmd("echo run=minimized>> C:\\PROGMAN\\Startup\\Eyes.lnk")
+    start = len(vm.log)
+    vm.send("win\r")
+    vm.wait_for("C:\\BDOS", 20, start)            # Where.lnk ran CD in C:\BDOS
+    time.sleep(2)
+    vm.screenshot("50-startup")
+    vm.keys("ret")                                  # [Finished - press any key]
+    time.sleep(1)
+    vm.keys("alt-n")                                # a shell to work from
+    time.sleep(1.5)
+    vm.screenshot("50b-shell")
+    wins, _ = vm.windows()
+    assert "Eyes" in wins and "Eyes" in vm.minimized, (wins, vm.minimized)
+    def run(app, title, settle=1.5):
+        start = len(vm.log)
+        vm.send(f"echo run {app} > DESK$\r")
+        time.sleep(settle)
+    def close():
+        vm.keys("alt-q")
+        time.sleep(0.6)
+    shell_rect = vm.windows()[0]["Shell"]
+    def locate(title):
+        """where the new window is: back to the shell (its bottom shows), ask, raise it again"""
+        sx, sy, sw, sh = shell_rect
+        vm.point(sx + 40, sy + sh - 20)
+        time.sleep(0.3)
+        vm.click()
+        wins, _ = vm.windows()
+        vm.cmd(f"echo raise {title} > DESK$")
+        time.sleep(0.5)
+        return wins[title]
+    # the calculator: typed sums, the answer copied
+    run("@calc", "Calculator")
+    vm.send("12*3.5=")
+    time.sleep(0.5)
+    vm.screenshot("51-calculator")
+    vm.send("\x03")
+    time.sleep(0.3)
+    close()
+    vm.cmd("type CLIP$", "42")
+    # Character Map: find A, add it, copy
+    run("@charmap", "Character Map")
+    vm.send("A\r\x03")
+    time.sleep(0.5)
+    vm.screenshot("52-charmap")
+    close()
+    vm.cmd("type CLIP$", "A")
+    run("@help", "Help")
+    vm.screenshot("53-help")
+    close()
+    wins, _ = vm.windows()
+    assert not any(t.startswith("Help") for t in wins), wins
+    run("@mines", "Mines")
+    x, y, w, h = locate("Mines")
+    vm.point(x + w // 2, y + 24 + 36 + 44 + 4 * 24 + 12)   # a cell in the middle
+    time.sleep(0.3)
+    vm.click()
+    vm.screenshot("54-mines")
+    close()
+    run("@terminal", "Terminal")
+    vm.screenshot("55-terminal")
+    close()
+    run("@neko", "Neko")
+    x, y, w, h = locate("Neko")
+    vm.point(x + 40, y + 60)
+    time.sleep(2)
+    vm.screenshot("56-neko")
+    close()
+    vm.keys("ctrl-esc")
+    time.sleep(1.5)
+    vm.screenshot("57-taskman")
+    close()
+    wins, _ = vm.windows()
+    assert "Task Manager" not in wins, wins
+    vm.cmd("control dos")
+    time.sleep(1)
+    vm.screenshot("58-dos-applet")
+    close()
+    vm.cmd("del C:\\PROGMAN\\Startup\\Where.lnk")
+    vm.cmd("del C:\\PROGMAN\\Startup\\Eyes.lnk")
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
+
+
+def t_dpmi(vm):
+    vm.cmd("cd \\dosapps")
+    out = vm.cmd("dpmitest", "DPMI test passed", timeout=60)
+    for i in range(8):
+        assert f"ok {i}" in out, out
+    vm.cmd("echo %ERRORLEVEL%", "0")
+    vm.cmd("cd \\")
+
+
+def t_native(vm):
+    vm.cmd("hello64 one two", ["Hello from a native 64-bit bdos program!", "argument 2: two"])
+    vm.cmd("libctest", "libctest: all passed", timeout=60)
+    out = vm.cmd("primes 2000000", "148933 primes", timeout=120)
+    # one thread vs all of them: more cores should be faster
+    t1 = float(re.search(r"in ([\d.]+) seconds", vm.cmd("primes 3000000 1", "216816 primes", timeout=180)).group(1))
+    tn = float(re.search(r"in ([\d.]+) seconds", vm.cmd("primes 3000000", "216816 primes", timeout=180)).group(1))
+    ncpu = int(os.environ.get("SMP", "4"))
+    if ncpu > 1:
+        assert tn < t1 * 0.75, f"threads didn't help: 1 thread {t1}s, {ncpu} threads {tn}s"
+    # Ctrl+C stops a busy program, threads and all
+    start = len(vm.log)
+    vm.send("spin64 60\r")
+    vm.wait_for("Ctrl+C stops", 20, start)
+    time.sleep(1.5)
+    vm.send("\x03")
+    out = vm.settle(start, 15)
+    assert "^C" in out and "Done." not in out, out
+    vm.cmd("echo %ERRORLEVEL%", "130")
+    vm.cmd("ver", "bdos version")
+
+
+def t_tcc(vm):
+    vm.cmd("cd \\bdos\\samples")
+    vm.cmd("tcc -v", "tcc version 0.9.28")
+    vm.cmd("tcc -o T64.EXE hello64.c", absent=["error", "rror:"], timeout=60)
+    vm.cmd("t64 x y", ["Hello from a native 64-bit bdos program!", "argument 2: y"])
+    vm.cmd("tcc -run hello64.c a b", ["Hello from a native 64-bit bdos program!", "argument 2: b"], timeout=60)
+    vm.cmd("tcc -o LT.EXE libctest.c", absent=["error", "rror:"], timeout=60)
+    vm.cmd("lt", "libctest: all passed", timeout=60)
+    vm.cmd("tcc primes.c", absent="rror", timeout=60)
+    vm.cmd("primes 1000000", "78498 primes", timeout=60)
+    vm.cmd("del t64.exe")
+    vm.cmd("del lt.exe")
+    vm.cmd("del primes.exe")
+    vm.cmd("cd \\")
+
+
 def t_screens(vm):
     vm.cmd("cls")
     vm.cmd("cd \\")
@@ -748,8 +1306,8 @@ try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
-                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("control", t_control), ("dos", t_dos),
-                     ("desktop", t_desktop), ("win31", t_win31), ("screens", t_screens),
+                     ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("control", t_control), ("dos", t_dos), ("dos2", t_dos2), ("dosfull", t_dosfull), ("dosgfx", t_dosgfx),
+                     ("desktop", t_desktop), ("win31", t_win31), ("smp", t_smp), ("winkeys", t_winkeys), ("termui", t_termui), ("applets", t_applets), ("dpmi", t_dpmi), ("native", t_native), ("tcc", t_tcc), ("screens", t_screens),
                      ("persist", t_persist)]:
         if suite(name):
             check(name, fn, vm)

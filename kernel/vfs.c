@@ -6,6 +6,7 @@
 #include "vfs.h"
 #include "drv/drv.h"
 #include "../fs/bdosfs.h"
+#include "disk.h"
 
 static struct vfs_drive drives[26];
 static struct chardev *devices[16];
@@ -15,6 +16,14 @@ const char *vfs_strerror(int err)
 {
 	switch (err) {
 	case E_BADDRIVE: return "Invalid drive specification";
+	case E_BADF: return "Bad file handle";
+	case E_NFILE: return "Too many open files";
+	case E_NOSYS: return "No such system call";
+	case E_TIMEDOUT: return "Timed out";
+	case E_REFUSED: return "Connection refused";
+	case E_RESET: return "Connection reset";
+	case E_NOHOST: return "Unknown host";
+	case E_NONET: return "No network (try IPCONFIG)";
 	case E_NOTSUP: return "Not supported on this drive";
 	case E_XDEV: return "Cannot move between drives (use COPY)";
 	}
@@ -86,9 +95,64 @@ int vfs_unmount(char letter)
 	return 0;
 }
 
+/*
+ * SUBST: a letter that stands for a directory on another drive, the way DOS
+ * did it - for installers that insist on running from A: or B:.
+ */
+static char subst_to[26][VFS_PATH_MAX];
+static struct vfs_drive subst_drv[26];
+
+static int subst_of(char letter)
+{
+	letter = (char)toupper(letter);
+	return letter >= 'A' && letter <= 'Z' && subst_to[letter - 'A'][0];
+}
+
+int vfs_subst(char letter, const char *target)
+{
+	letter = (char)toupper(letter);
+	if (letter < 'A' || letter > 'Z')
+		return E_BADDRIVE;
+	int i = letter - 'A';
+	if (!target) {
+		if (!subst_to[i][0])
+			return E_NOENT;
+		subst_to[i][0] = 0;
+		return 0;
+	}
+	if (drives[i].ops || (letter == 'T' && task_current() && task_current()->tdrive))
+		return E_EXIST;		/* a real drive has that letter */
+	if (!isalpha(target[0]) || target[1] != ':' || subst_of(target[0]) || toupper(target[0]) == letter)
+		return E_INVAL;
+	struct vstat st;
+	int r = vfs_stat(target, &st);
+	if (!r && st.type != VFS_DIR)
+		r = E_NOTDIR;
+	if (r && !(target[2] == '\\' && !target[3]))
+		return r;
+	strncpy0(subst_to[i], target, sizeof subst_to[i]);
+	return 0;
+}
+
+const char *vfs_subst_target(char letter)
+{
+	return subst_of(letter) ? subst_to[toupper(letter) - 'A'] : NULL;
+}
+
 struct vfs_drive *vfs_drive(char letter)
 {
 	letter = (char)toupper(letter);
+	if (subst_of(letter)) {
+		const char *to = subst_to[letter - 'A'];
+		struct vfs_drive *real = vfs_drive(to[0]);
+		if (!real)
+			return NULL;
+		struct vfs_drive *d = &subst_drv[letter - 'A'];
+		*d = *real;
+		d->letter = letter;
+		snprintf(d->desc, sizeof d->desc, "%s (SUBST)", to);
+		return d;
+	}
 	/* a remote session's T: belongs to the tasks in that session only */
 	struct task *t = task_current();
 	if (letter == 'T' && t && t->tdrive)
@@ -106,6 +170,8 @@ void vfs_drives(void (*cb)(struct vfs_drive *d, void *arg), void *arg)
 			cb(t->tdrive, arg);
 		else if (drives[i].ops)
 			cb(&drives[i], arg);
+		else if (subst_to[i][0] && vfs_drive((char)('A' + i)))
+			cb(&subst_drv[i], arg);
 	}
 }
 
@@ -249,6 +315,23 @@ static int split(const char *abs, struct vfs_drive **d, char *inner, size_t n)
 {
 	if (!isalpha(abs[0]) || abs[1] != ':')
 		return E_INVAL;
+	if (subst_of(abs[0])) {
+		/* A:\X -> T:\LEMMINGS\X, and on with that */
+		char real[VFS_PATH_MAX];
+		const char *rest = abs + 2;
+		while (is_sep(*rest))
+			rest++;
+		strncpy0(real, subst_to[toupper(abs[0]) - 'A'], sizeof real);
+		if (*rest) {
+			size_t l = strlen(real);
+			if (l && !is_sep(real[l - 1]))
+				strcat0(real, "\\", sizeof real);
+			strcat0(real, rest, sizeof real);
+		}
+		if (subst_of(real[0]))
+			return E_BADDRIVE;
+		return split(real, d, inner, n);
+	}
 	*d = vfs_drive(abs[0]);
 	if (!*d)
 		return E_BADDRIVE;
@@ -377,7 +460,10 @@ int vfs_setattr(const char *abs, uint8_t attr)
 int vfs_xattr_get(const char *abs, const char *key, char *val, size_t n)
 {
 	SPLIT(abs);
-	return d->ops->xattr_get ? d->ops->xattr_get(d->ctx, inner, key, val, n) : E_NOTSUP;
+	if (!d->ops->xattr_get)
+		return E_NOTSUP;
+	int r = d->ops->xattr_get(d->ctx, inner, key, val, n);
+	return r < 0 ? r : 0;	/* drives say how long it was; callers want 0 for found */
 }
 
 int vfs_xattr_set(const char *abs, const char *key, const char *val)
@@ -846,6 +932,52 @@ static int mount_bdosfs(char letter, struct blkdev *b, uint64_t start, uint64_t 
 	return 0;
 }
 
+/* a bdosfs partition the installer just made: mount it, format it, let go of it */
+int vfs_mount_bdos(char letter, struct blkdev *b, uint64_t start, uint64_t sectors, const char *what)
+{
+	letter = (char)toupper(letter);
+	if (letter < 'A' || letter > 'Z' || drives[letter - 'A'].ops)
+		return E_EXIST;
+	return mount_bdosfs(letter, b, start, sectors, what) ? E_IO : 0;
+}
+
+int vfs_format_bdos(struct blkdev *b, uint64_t start, uint64_t sectors, const char *label)
+{
+	struct bvol v;
+	memset(&v, 0, sizeof v);
+	v.blk = b;
+	v.start = start;
+	v.dev.read = bd_read;
+	v.dev.write = bd_write;
+	v.dev.flush = bd_flush;
+	v.dev.ctx = &v;
+	v.dev.nblocks = sectors / 8;
+	return bfs_format(&v.dev, label, rtc_epoch()) ? E_IO : 0;
+}
+
+/* unmount a bdosfs drive, writing everything out */
+int vfs_eject(char letter)
+{
+	letter = (char)toupper(letter);
+	if (letter < 'A' || letter > 'Z' || drives[letter - 'A'].ops != &bdosfs_ops)
+		return E_BADDRIVE;
+	struct bvol *v = drives[letter - 'A'].ctx;
+	vfs_unmount(letter);
+	bfs_unmount(v->fs);
+	bd_flush(v);
+	kfree(v);
+	return 0;
+}
+
+/* the disk a bdosfs drive lives on (NULL if it isn't one) */
+struct blkdev *vfs_drive_disk(char letter)
+{
+	struct vfs_drive *d = vfs_drive(letter);
+	if (!d || d->ops != &bdosfs_ops)
+		return NULL;
+	return ((struct bvol *)d->ctx)->blk;
+}
+
 /* ---- standard devices ------------------------------------------------------------ */
 
 static long nul_read(struct chardev *d, void *buf, size_t n)
@@ -891,30 +1023,36 @@ void storage_init(void)
 
 	pci_init();
 	ahci_init();
+	ata_init();
+	nvme_init();
+	virtio_blk_init();
+	virtio_scsi_init();
 
 	char next = 'C';
-	uint8_t *mbr = kmalloc(512);
-	for (int i = 0; i < blk_count() && mbr; i++) {
+	/* the live CD: its RAM disk is C: whatever else is here (an installed
+	 * bdos to upgrade, say, which becomes D:) */
+	int live = (bootinfo->flags & BDOS_BOOT_LIVE) && bootinfo->rootfs_base;
+	if (live) {
+		struct blkdev *rd = ramdisk_create("ram0", P2V(bootinfo->rootfs_base), bootinfo->rootfs_size);
+		if (rd && !mount_bdosfs('C', rd, 0, rd->sectors, "RAM disk (from the CD)"))
+			next++;
+	}
+	for (int i = 0; i < blk_count(); i++) {
 		struct blkdev *b = blk_get(i);
-		if (b->read(b, 0, 1, mbr) || mbr[510] != 0x55 || mbr[511] != 0xAA)
-			continue;
-		for (int p = 0; p < 4; p++) {
-			uint8_t *e = mbr + 446 + p * 16;
-			uint32_t start, count;
-			memcpy(&start, e + 8, 4);
-			memcpy(&count, e + 12, 4);
-			if (e[4] != 0xBD || !count)
+		struct part parts[MAX_PARTS];
+		int n = disk_partitions(b, parts, MAX_PARTS);
+		for (int p = 0; p < n; p++) {
+			if (parts[p].type != PART_BDOS)
 				continue;
 			char what[32];
-			snprintf(what, sizeof what, "%s partition %d", b->name, p + 1);
-			if (!mount_bdosfs(next, b, start, count, what))
+			snprintf(what, sizeof what, "%s partition %d", b->name, parts[p].index);
+			if (!mount_bdosfs(next, b, parts[p].start, parts[p].count, what))
 				next++;
 		}
 	}
-	kfree(mbr);
 
-	if (next == 'C' && bootinfo->rootfs_base) {
-		struct blkdev *rd = ramdisk_create("ram0", (void *)bootinfo->rootfs_base,
+	if (next == 'C' && bootinfo->rootfs_base && !live) {
+		struct blkdev *rd = ramdisk_create("ram0", P2V(bootinfo->rootfs_base),
 		    bootinfo->rootfs_size);
 		if (rd && !mount_bdosfs('C', rd, 0, rd->sectors, "RAM disk (from ROOTFS.IMG)"))
 			next++;

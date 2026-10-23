@@ -1,0 +1,47 @@
+The Desktop's Programs
+======================
+
+Main
+----
+  Shell           a C:\> prompt in a window
+  File Manager    folders and files: drag to copy or move, Edit > Copy/Paste
+  Control Panel   Date/Time, Network, Desktop, Themes, Mouse, Keyboard,
+                  DOS and System
+  Clock           click it to switch analogue/digital; minimized, the icon
+                  still keeps time
+  Pulse           how busy each core is; the buttons switch cores off
+  Help            this
+
+Accessories
+-----------
+  Calculator      type numbers and + - * / = straight in; Ctrl+C copies the
+                  answer, Ctrl+V pastes a number
+  Character Map   all 256 characters of the font; double-click to collect
+                  some, then Copy
+  Terminal        a phone book of telnet hosts (BBSes!); the list is kept in
+                  C:\BDOS\PHONE.TXT as Name=host port
+  Task Manager    the windows on this desktop (Switch To, End Task, Cascade,
+                  Tile) and every task running; Ctrl+Esc opens it anywhere
+  Eyes            they watch the pointer, even minimized
+  Neko            a cat that chases the pointer around its window, and naps
+                  when you stop
+
+Games
+-----
+  Mines           left-click to dig, right-click (or Shift+click) to flag,
+                  click a number whose flags are all down to dig around it;
+                  the face, or F2, starts again
+
+Program Manager's Options
+-------------------------
+  Auto Arrange             keep each group's icons in name order
+  Minimize on Use          Program Manager becomes an icon when it starts
+                           something
+  Save Settings on Exit    remember where groups and the window are
+
+The DOS applet
+--------------
+How fast DOS programs run (a program's Properties, or a Program Manager
+item, can pick its own), and how a DOS screen fits a bigger window:
+sharp keeps whole pixels when they nearly fill it, smooth keeps the shape
+and fills the window, stretch fills it all.

@@ -4,7 +4,9 @@
 
 #include "gfx.h"
 
-enum { EV_NONE, EV_KEY, EV_MOVE, EV_DOWN, EV_UP, EV_CLOSE, EV_RESIZE };
+enum { EV_NONE, EV_KEY, EV_MOVE, EV_DOWN, EV_UP, EV_CLOSE, EV_RESIZE, EV_RAWKEY,
+	EV_WHEEL,	/* key: clicks, + up (away from you), - down; x, y: where */
+};
 
 struct event {
 	int type;
@@ -35,6 +37,9 @@ struct display {
 	void (*attach)(struct display *d, struct wm *wm);	/* optional */
 	int alive;			/* 0 once the far end is gone */
 	int draws_pointer;
+	/* when the far end draws the pointer: its shape (0 an arrow, else resize
+	 * edges: 1 left, 2 right, 4 top, 8 bottom). Optional */
+	void (*pointer)(struct display *d, int shape);
 	const char *name;
 	void *priv;
 };

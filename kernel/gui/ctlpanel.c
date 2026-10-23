@@ -10,6 +10,7 @@
 #include "../vfs.h"
 #include "../settings.h"
 #include "../net/net.h"
+#include "../net/ntp.h"
 #include "gfx.h"
 #include "form.h"
 #include "themes.h"
@@ -21,6 +22,7 @@ static void open_themes(struct wm *wm);
 static void open_mouse(struct wm *wm);
 static void open_keyboard(struct wm *wm);
 static void open_system(struct wm *wm);
+static void open_dos(struct wm *wm);
 
 /* bring an already-open applet forward instead of opening it twice */
 static int raise_existing(struct wm *wm, const char *title)
@@ -57,6 +59,7 @@ static const struct applet {
 	{ "Themes", "palette", "Window colours, desktop colour and pattern, all at once", "themes", open_themes },
 	{ "Mouse", "mouse", "Pointer speed, double-click speed, button swap", "mouse", open_mouse },
 	{ "Keyboard", "keyboard", "How soon and how fast keys repeat", "keyboard", open_keyboard },
+	{ "DOS", "game", "How fast DOS programs run, and how their screens fit", "dos", open_dos },
 	{ "System", "computer", "What this machine is and how it's doing", "system", open_system },
 };
 
@@ -167,8 +170,36 @@ static const char *const month_names[] = {
 
 struct dt {
 	int year, month, day, hour, min, sec, h24, secs, cal, now, ok, cancel, apply;
+	int zone, ntp_on, ntp, sync, syncmsg;
 	int edited;		/* the user has changed something: stop following the clock */
+	const char *zones[64];
 };
+
+/* Sync now runs here, so the desktop carries on while the server answers */
+static struct {
+	volatile int busy, done;
+	char msg[96];
+} dt_sync;
+
+static void dt_sync_task(void *arg)
+{
+	(void)arg;
+	ntp_sync_now(dt_sync.msg, sizeof dt_sync.msg);
+	dt_sync.done = 1;
+	dt_sync.busy = 0;
+}
+
+/* the time zone and server as the form has them, into the settings */
+static void dt_save_ntp(struct form *f)
+{
+	struct dt *d = form_priv(f);
+	int z = (int)form_val(f, d->zone);
+	if (z >= 0 && z < tz_nzones) {
+		setting_set("clock.tz", tz_zones[z].tz);
+		setting_set("clock.dst", tz_zones[z].dst);
+	}
+	setting_set("net.ntp", form_val(f, d->ntp_on) ? form_text(f, d->ntp) : "");
+}
 
 static void dt_load_clock(struct form *f)
 {
@@ -238,8 +269,35 @@ static void dt_event(struct form *f, int id, int ev)
 		if (!d->edited)
 			dt_load_clock(f);
 		dt_show_now(f);
+		if (dt_sync.done) {
+			dt_sync.done = 0;
+			form_set_text(f, d->syncmsg, dt_sync.msg);
+			form_enable(f, d->sync, 1);
+		}
 		return;
 	}
+	if (id == d->sync && ev == FE_CLICK) {
+		if (dt_sync.busy)
+			return;
+		dt_save_ntp(f);
+		if (!*setting("net.ntp")) {
+			form_set_text(f, d->syncmsg, "Tick the box and name a server first.");
+			return;
+		}
+		dt_sync.busy = 1;
+		dt_sync.done = 0;
+		d->edited = 0;
+		form_set_text(f, d->syncmsg, "Asking the time server...");
+		form_enable(f, d->sync, 0);
+		task_spawn("ntpsync", dt_sync_task, NULL, NULL);
+		return;
+	}
+	if (id == d->ntp_on && ev == FE_CHANGE) {
+		form_enable(f, d->ntp, (int)form_val(f, d->ntp_on));
+		return;
+	}
+	if (id == d->zone || id == d->ntp)
+		return;
 	if (id == d->cal && ev == FE_CLICK) {
 		int px, py;
 		form_point(f, &px, &py);
@@ -268,6 +326,7 @@ static void dt_event(struct form *f, int id, int ev)
 	if (ev != FE_CLICK)
 		return;
 	if (id == d->ok || id == d->apply) {
+		dt_save_ntp(f);
 		if (d->edited) {
 			int y = (int)form_val(f, d->year), mo = (int)form_val(f, d->month) + 1;
 			int dd = (int)MIN(form_val(f, d->day), clock_days_in_month(y, mo));
@@ -293,7 +352,7 @@ static void open_date(struct wm *wm)
 	struct dt *d = kzalloc(sizeof *d);
 	if (!d)
 		return;
-	int cw = 424, ch = 300;
+	int cw = 424, ch = 420;
 	struct form *f = form_new("Date/Time", cw, ch, dt_event, d);
 	if (!f) {
 		kfree(d);
@@ -330,6 +389,19 @@ static void open_date(struct wm *wm)
 	form_add(f, FW_GROUP, 212, 140, 204, 64, "The clock reads");
 	d->now = form_add(f, FW_LABEL, 224, 166, 0, 0, "");
 	form_add(f, FW_LABEL, 214, 214, 0, 0, "Changes take effect on OK.");
+
+	form_add(f, FW_GROUP, 8, 258, cw - 16, 116, "Internet time");
+	d->zone = form_add(f, FW_CHOICE, 18, 280, cw - 36, 22, NULL);
+	for (int i = 0; i < tz_nzones && i < 64; i++)
+		d->zones[i] = tz_zones[i].name;
+	form_options(f, d->zone, d->zones, MIN(tz_nzones, 64));
+	form_set_val(f, d->zone, tz_find(setting("clock.tz"), setting("clock.dst")));
+	d->ntp_on = form_add(f, FW_CHECK, 18, 310, 120, 20, "Server:");
+	form_set_val(f, d->ntp_on, *setting("net.ntp") != 0);
+	d->ntp = form_add(f, FW_EDIT, 112, 308, 190, 22, *setting("net.ntp") ? setting("net.ntp") : "pool.ntp.org");
+	form_enable(f, d->ntp, *setting("net.ntp") != 0);
+	d->sync = form_add(f, FW_BUTTON, 310, 306, 98, 26, "Sync now");
+	d->syncmsg = form_add(f, FW_LABEL, 18, 342, 0, 0, ntp_status());
 	d->ok = ok_cancel(f, cw, ch, 1);
 	d->cancel = d->ok + 1;
 	d->apply = d->ok + 2;
@@ -342,7 +414,8 @@ static void open_date(struct wm *wm)
 /* ---- Network --------------------------------------------------------------------------------- */
 
 struct netapp {
-	int name, info, list, browse, shell, desk, ok, cancel;
+	int name, info, list, browse, shell, desk, ok, cancel, apply;
+	int addr, ip, mask, gw, dns, bterm, pass, telnet, now;
 	char orig[32];
 };
 
@@ -385,6 +458,61 @@ static void net_start_browse(struct form *f)
 	form_tick(f, 200);
 }
 
+/* what the address is right now, under the settings */
+static void net_show_now(struct form *f)
+{
+	struct netapp *n = form_priv(f);
+	char line[96] = "No network adapter found.";
+	if (net_present()) {
+		struct ip_info in;
+		ip_get(&in);
+		char a[16], g[16];
+		ip_fmt(in.ip, a);
+		ip_fmt(in.gw, g);
+		snprintf(line, sizeof line, "Now: %s%s, gateway %s", in.ip ? a : "no address yet",
+		    in.dhcp ? " (DHCP)" : "", in.gw ? g : "none");
+	}
+	form_set_text(f, n->now, line);
+}
+
+/* OK and Apply: check what's typed, then the settings (which take effect at once) */
+static int net_apply(struct form *f)
+{
+	struct netapp *n = form_priv(f);
+	struct wm *wm = form_wm(f);
+	const char *nm = form_text(f, n->name);
+	for (const char *p = nm; *p; p++)
+		if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
+			wm_message(wm, "Network", "A computer name can have letters, digits, - and _.");
+			return 0;
+		}
+	int fixed = form_val(f, n->addr) == 1;
+	uint32_t a;
+	if (fixed && (ip_parse(form_text(f, n->ip), &a) || ip_parse(form_text(f, n->mask), &a) ||
+	    (*form_text(f, n->gw) && ip_parse(form_text(f, n->gw), &a)))) {
+		wm_message(wm, "Network", "A fixed address needs an IP address and a mask like 192.168.1.50 and 255.255.255.0 (and the gateway in the same form, if there is one).");
+		return 0;
+	}
+	if (net_present() && *nm && strcasecmp(nm, n->orig)) {
+		net_set_hostname(nm);
+		vfs_spew("C:\\BDOS\\HOSTNAME.TXT", net_hostname(), strlen(net_hostname()));
+		strncpy0(n->orig, net_hostname(), sizeof n->orig);
+	}
+	if (fixed) {
+		setting_set("net.mask", form_text(f, n->mask));
+		setting_set("net.gateway", form_text(f, n->gw));
+		setting_set("net.ip", form_text(f, n->ip));
+	} else {
+		setting_set("net.ip", "dhcp");
+	}
+	setting_set("net.dns", form_text(f, n->dns));
+	setting_set_int("net.udp", form_val(f, n->bterm));
+	setting_set("net.password", form_text(f, n->pass));
+	setting_set_int("net.telnet", form_val(f, n->telnet));
+	net_show_now(f);
+	return 1;
+}
+
 static void net_event(struct form *f, int id, int ev)
 {
 	struct netapp *n = form_priv(f);
@@ -393,9 +521,10 @@ static void net_event(struct form *f, int id, int ev)
 		return;
 	}
 	if (ev == FE_TICK) {
+		net_show_now(f);
 		if (browse.done) {
 			browse.done = 0;
-			form_tick(f, 0);
+			form_tick(f, 1000);	/* on with the address line */
 			form_list_clear(f, n->list);
 			for (int i = 0; i < browse.n; i++) {
 				char line[48];
@@ -427,19 +556,18 @@ static void net_event(struct form *f, int id, int ev)
 			snprintf(cmd, sizeof cmd, "WIN \\\\%s", pick);
 			wm_launch(form_wm(f), cmd, cmd);
 		}
-	} else if (id == n->ok && ev == FE_CLICK) {
-		const char *nm = form_text(f, n->name);
-		if (net_present() && *nm && strcasecmp(nm, n->orig)) {
-			for (const char *p = nm; *p; p++)
-				if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
-					wm_message(form_wm(f), "Network",
-					    "A computer name can have letters, digits, - and _.");
-					return;
-				}
-			net_set_hostname(nm);
-			vfs_spew("C:\\BDOS\\HOSTNAME.TXT", net_hostname(), strlen(net_hostname()));
-		}
-		form_close(f);
+	} else if (id == n->addr && ev == FE_CHANGE) {
+		int fixed = form_val(f, n->addr) == 1;
+		form_enable(f, n->ip, fixed);
+		form_enable(f, n->mask, fixed);
+		form_enable(f, n->gw, fixed);
+	} else if (id == n->bterm && ev == FE_CHANGE) {
+		form_enable(f, n->pass, (int)form_val(f, n->bterm));
+	} else if ((id == n->ok || id == n->apply) && ev == FE_CLICK) {
+		if (!net_apply(f))
+			return;
+		if (id == n->ok)
+			form_close(f);
 	} else if (id == n->cancel && ev == FE_CLICK) {
 		form_close(f);
 	}
@@ -452,7 +580,7 @@ static void open_network(struct wm *wm)
 	struct netapp *n = kzalloc(sizeof *n);
 	if (!n)
 		return;
-	int cw = 420, ch = 352;
+	int cw = 620, ch = 430;
 	struct form *f = form_new("Network", cw, ch, net_event, n);
 	if (!f) {
 		kfree(n);
@@ -463,48 +591,64 @@ static void open_network(struct wm *wm)
 	n->name = form_add(f, FW_EDIT, 136, 10, 200, 24, up ? net_hostname() : "");
 	strncpy0(n->orig, up ? net_hostname() : "", sizeof n->orig);
 	form_enable(f, n->name, up);
+	form_add(f, FW_LABEL, 346, 14, 0, 0, "Others reach it as \\\\NAME.");
 	char info[96];
 	if (up) {
 		uint8_t mac[6];
 		net_mac(mac);
-		snprintf(info, sizeof info, "%s  %02x:%02x:%02x:%02x:%02x:%02x  link %s", net_adapter(),
+		snprintf(info, sizeof info, "Adapter: %s  %02x:%02x:%02x:%02x:%02x:%02x  link %s", net_adapter(),
 		    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], net_link() ? "up" : "down");
 	} else {
-		strcpy(info, "No network adapter found.");
+		strcpy(info, "No network adapter found. bdos has drivers for Intel E1000 cards.");
 	}
-	form_add(f, FW_LABEL, 14, 44, 0, 0, "Adapter:");
-	n->info = form_add(f, FW_LABEL, 86, 44, 0, 0, info);
-	char ipline[96] = "none";
-	if (up) {
-		struct ip_info in;
-		ip_get(&in);
-		char a[16];
-		ip_fmt(in.ip, a);
-		snprintf(ipline, sizeof ipline, "%s%s   bterm: %s", in.ip ? a : "none yet",
-		    in.dhcp ? " (DHCP)" : "", in.udp ? "on" : "off");
-		if (in.udp) {
-			char port[16];
-			snprintf(port, sizeof port, ", UDP %d", in.port);
-			strcat0(ipline, port, sizeof ipline);
-		}
-	}
-	form_add(f, FW_LABEL, 14, 66, 0, 0, "IP address:");
-	form_add(f, FW_LABEL, 110, 66, 0, 0, ipline);
-	form_add(f, FW_LABEL, 14, 88, 0, 0, "Others reach this computer as \\\\NAME on the LAN.");
+	n->info = form_add(f, FW_LABEL, 14, 42, 0, 0, info);
+	n->now = form_add(f, FW_LABEL, 14, 62, 0, 0, "");
 
-	form_add(f, FW_GROUP, 8, 112, cw - 16, 186, "Machines on the network");
-	n->list = form_add(f, FW_LIST, 18, 136, 260, 150, up ? "Press Browse" : "");
-	n->browse = form_add(f, FW_BUTTON, 292, 136, 110, 26, "Browse");
-	n->shell = form_add(f, FW_BUTTON, 292, 172, 110, 26, "Shell...");
-	n->desk = form_add(f, FW_BUTTON, 292, 208, 110, 26, "Desktop...");
-	form_add(f, FW_LABEL, 292, 244, 0, 0, "T: is your");
-	form_add(f, FW_LABEL, 292, 262, 0, 0, "folder there");
+	/* the address */
+	form_add(f, FW_GROUP, 8, 88, 300, 176, "Address");
+	n->addr = form_add(f, FW_CHOICE, 18, 112, 280, 22, NULL);
+	static const char *const addrs[] = { "Automatic (DHCP)", "Fixed address" };
+	form_options(f, n->addr, addrs, 2);
+	int fixed = strcasecmp(setting("net.ip"), "dhcp") != 0;
+	form_set_val(f, n->addr, fixed);
+	form_add(f, FW_LABEL, 18, 146, 0, 0, "IP address:");
+	n->ip = form_add(f, FW_EDIT, 132, 142, 166, 22, fixed ? setting("net.ip") : "");
+	form_add(f, FW_LABEL, 18, 174, 0, 0, "Subnet mask:");
+	n->mask = form_add(f, FW_EDIT, 132, 170, 166, 22, setting("net.mask"));
+	form_add(f, FW_LABEL, 18, 202, 0, 0, "Gateway:");
+	n->gw = form_add(f, FW_EDIT, 132, 198, 166, 22, setting("net.gateway"));
+	form_add(f, FW_LABEL, 18, 234, 0, 0, "DNS server:");
+	n->dns = form_add(f, FW_EDIT, 132, 230, 166, 22, setting("net.dns"));
+	form_enable(f, n->ip, fixed);
+	form_enable(f, n->mask, fixed);
+	form_enable(f, n->gw, fixed);
+
+	/* who may come in */
+	form_add(f, FW_GROUP, 8, 272, 300, 102, "Others connecting");
+	n->bterm = form_add(f, FW_CHECK, 18, 294, 270, 20, "bterm (shells, the desktop, T:)");
+	form_set_val(f, n->bterm, setting_int("net.udp") != 0);
+	form_add(f, FW_LABEL, 36, 322, 0, 0, "Password:");
+	n->pass = form_add(f, FW_EDIT, 132, 318, 166, 22, setting("net.password"));
+	form_enable(f, n->pass, setting_int("net.udp") != 0);
+	n->telnet = form_add(f, FW_CHECK, 18, 348, 270, 20, "Telnet server on port 23");
+	form_set_val(f, n->telnet, setting_int("net.telnet") != 0);
+
+	/* the LAN */
+	form_add(f, FW_GROUP, 316, 88, cw - 324, 286, "Machines on the network");
+	n->list = form_add(f, FW_LIST, 326, 112, cw - 344, 196, up ? "Press Browse" : "");
+	n->browse = form_add(f, FW_BUTTON, 326, 318, 88, 26, "Browse");
+	n->shell = form_add(f, FW_BUTTON, 418, 318, 88, 26, "Shell...");
+	n->desk = form_add(f, FW_BUTTON, 510, 318, 88, 26, "Desktop...");
+	form_add(f, FW_LABEL, 326, 350, 0, 0, "T: there is your folder here.");
 	form_enable(f, n->browse, up);
 	form_enable(f, n->shell, up);
 	form_enable(f, n->desk, up);
-	n->ok = ok_cancel(f, cw, ch, 0);
+	n->ok = ok_cancel(f, cw, ch, 1);
 	n->cancel = n->ok + 1;
+	n->apply = n->ok + 2;
+	net_show_now(f);
 	form_show(wm, f, -1, -1);
+	form_tick(f, 1000);
 	if (up)
 		net_start_browse(f);
 }
@@ -1067,6 +1211,100 @@ static void open_keyboard(struct wm *wm)
 	form_show(wm, f, -1, -1);
 }
 
+/* ---- DOS ------------------------------------------------------------------------------- */
+
+static const char *const dos_speed_names[] = { "XT (4.77 MHz)", "AT (286)", "386", "486", "Pentium",
+	"As fast as possible" };
+static const char *const dos_speed_keys[] = { "xt", "at", "386", "486", "pentium", "max" };
+static const char *const dos_scale_names[] = { "Sharp: whole pixels, if they nearly fill it",
+	"Smooth: keep the shape, fill the window", "Stretch: fill the whole window" };
+static const char *const dos_scale_keys[] = { "sharp", "smooth", "stretch" };
+
+struct dosapp {
+	int speed, scale, trace, ok, cancel;
+	char o_speed[16], o_scale[16], o_trace[8];
+};
+
+static void dos_apply(struct form *f)
+{
+	struct dosapp *d = form_priv(f);
+	long v = form_val(f, d->speed);
+	if (v >= 0 && v < (long)NELEM(dos_speed_keys))
+		setting_set("dos.speed", dos_speed_keys[v]);
+	v = form_val(f, d->scale);
+	if (v >= 0 && v < (long)NELEM(dos_scale_keys))
+		setting_set("dos.scale", dos_scale_keys[v]);
+	/* keep a trace level of 2 or 3 someone set at the prompt, if the box stays ticked */
+	int on = (int)form_val(f, d->trace), was = (int)strtol(d->o_trace, NULL, 10);
+	setting_set("dos.trace", on ? (was ? d->o_trace : "1") : "0");
+}
+
+static void dos_event(struct form *f, int id, int ev)
+{
+	struct dosapp *d = form_priv(f);
+	if (ev == FE_CLOSE) {
+		kfree(d);
+		return;
+	}
+	if (ev == FE_CHANGE && (id == d->scale))
+		dos_apply(f);	/* a running game shows it at once */
+	else if (ev == FE_CLICK && id == d->ok) {
+		dos_apply(f);
+		form_close(f);
+	} else if (ev == FE_CLICK && id == d->cancel) {
+		setting_set("dos.speed", d->o_speed);
+		setting_set("dos.scale", d->o_scale);
+		setting_set("dos.trace", d->o_trace);
+		form_close(f);
+	} else if (ev == FE_CLICK && id == d->ok + 2) {
+		dos_apply(f);
+	}
+}
+
+static void open_dos(struct wm *wm)
+{
+	if (raise_existing(wm, "DOS"))
+		return;
+	struct dosapp *d = kzalloc(sizeof *d);
+	if (!d)
+		return;
+	int cw = 480, ch = 350;
+	struct form *f = form_new("DOS", cw, ch, dos_event, d);
+	if (!f) {
+		kfree(d);
+		return;
+	}
+	strncpy0(d->o_speed, setting("dos.speed"), sizeof d->o_speed);
+	strncpy0(d->o_scale, setting("dos.scale"), sizeof d->o_scale);
+	strncpy0(d->o_trace, setting("dos.trace"), sizeof d->o_trace);
+	form_add(f, FW_GROUP, 8, 4, cw - 16, 84, "Speed");
+	form_add(f, FW_LABEL, 18, 28, 0, 0, "DOS programs run at:");
+	d->speed = form_add(f, FW_CHOICE, 190, 24, cw - 210, 24, NULL);
+	form_options(f, d->speed, dos_speed_names, (int)NELEM(dos_speed_names));
+	form_set_val(f, d->speed, 3);
+	for (int i = 0; i < (int)NELEM(dos_speed_keys); i++)
+		if (!strcasecmp(d->o_speed, dos_speed_keys[i]))
+			form_set_val(f, d->speed, i);
+	form_add(f, FW_LABEL, 18, 56, 0, 0, "A program's Properties, or its Program Manager item,");
+	form_add(f, FW_LABEL, 18, 74, 0, 0, "can choose its own.");
+	form_add(f, FW_GROUP, 8, 96, cw - 16, 82, "Screen, in a bigger window");
+	d->scale = form_add(f, FW_CHOICE, 18, 120, cw - 36, 24, NULL);
+	form_add(f, FW_LABEL, 18, 152, 0, 0, "A game shows the change at once.");
+	form_options(f, d->scale, dos_scale_names, (int)NELEM(dos_scale_names));
+	for (int i = 0; i < (int)NELEM(dos_scale_keys); i++)
+		if (!strcasecmp(d->o_scale, dos_scale_keys[i]))
+			form_set_val(f, d->scale, i);
+	d->trace = form_add(f, FW_CHECK, 14, 188, cw - 28, 22, "When a program crashes, list what it last ran");
+	form_set_val(f, d->trace, strtol(d->o_trace, NULL, 10) != 0);
+	form_add(f, FW_GROUP, 8, 218, cw - 16, 82, "Keys in a DOS window");
+	form_add(f, FW_LABEL, 18, 238, 0, 0, "Ctrl+Alt+F11   freeze it to a state file");
+	form_add(f, FW_LABEL, 18, 256, 0, 0, "Ctrl+Alt+F12   go back to the frozen state");
+	form_add(f, FW_LABEL, 18, 274, 0, 0, "Ctrl+Alt+F10   what the screen is doing (tracing on)");
+	d->ok = ok_cancel(f, cw, ch, 1);
+	d->cancel = d->ok + 1;
+	form_show(wm, f, -1, -1);
+}
+
 /* ---- System ------------------------------------------------------------------------------ */
 
 struct sysapp {
@@ -1251,6 +1489,32 @@ static void clock_draw(struct form *f, int id, struct surface *s, struct rect r)
 	fill(s, cx - 3, cy - 3, 7, 7, col(0x202020));
 }
 
+/* minimized: a small face that keeps time (the hour and minute hands) */
+static void clock_icon(struct form *f, struct surface *s, int x, int y)
+{
+	(void)f;
+	int yy, mo, d, h, mi, sec;
+	arch_rtc(&yy, &mo, &d, &h, &mi, &sec);
+	int rad = 15, cx = x + 16, cy = y + 16;
+	for (int dy = -rad; dy <= rad; dy++) {
+		int dx = isqrt(rad * rad - dy * dy);
+		hline(s, cx - dx, cy + dy, 2 * dx + 1, col(0x000000));
+	}
+	rad -= 1;
+	for (int dy = -rad; dy <= rad; dy++) {
+		int dx = isqrt(rad * rad - dy * dy);
+		hline(s, cx - dx, cy + dy, 2 * dx + 1, col(0xFFFFFF));
+	}
+	for (int i = 0; i < 60; i += 5) {
+		int px = cx + isin(i) * 12 / 1024, py = cy - icos(i) * 12 / 1024;
+		fill(s, px, py, 1 + (i % 15 == 0), 1 + (i % 15 == 0), col(0x404040));
+	}
+	hand(s, cx, cy, (h % 12) * 5 + mi / 12, 7, 1, col(0x202020));
+	hand(s, cx, cy, mi, 11, 0, col(0x202020));
+	if (setting_int("clock.seconds"))
+		hand(s, cx, cy, sec, 12, 0, col(0xC03030));
+}
+
 static void clock_event(struct form *f, int id, int ev)
 {
 	struct clockapp *ca = form_priv(f);
@@ -1282,6 +1546,8 @@ void clock_open(struct wm *wm)
 	ca->face = form_add(f, FW_CUSTOM, 0, 0, 200, 200, NULL);
 	form_custom(f, ca->face, clock_draw);
 	form_resizable(f, 90, 90);
+	form_icon_name(f, "clock");
+	form_icon_draw(f, clock_icon);
 	form_tick(f, 1000);
 	form_show(wm, f, -1, 40);
 }

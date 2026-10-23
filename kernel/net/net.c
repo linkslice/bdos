@@ -4,9 +4,13 @@
  * Frame: Ethernet header, then
  *   u16 magic 0xBD05, u8 type, u8 flags, u32 conn, u32 seq, u32 ack, u16 len,
  *   payload (up to 1400 bytes).
- * Connections number their DATA frames and acknowledge cumulatively; the
- * sender keeps up to WINDOW frames in flight and resends them all if an
- * acknowledgement is late (go-back-N). On a LAN that's plenty.
+ * Connections number their DATA frames and acknowledge cumulatively. An
+ * ACK may carry an 8-byte bitmap of the 64 frames after the one it asks for
+ * that already arrived (a selective ack), so the sender resends just the
+ * gaps: straight away when the bitmap shows one, or when the measured
+ * round trip says a frame is overdue. Receivers keep frames that arrive
+ * early. Peers that don't send bitmaps (older bdos and bterm) still work:
+ * their frames are simply resent the old way, all of them.
  */
 #include "../kernel.h"
 #include "../vfs.h"
@@ -15,8 +19,11 @@
 #define ETHERTYPE	0x88B5
 #define MAGIC		0xBD05
 #define MAX_PAYLOAD	1400
-#define WINDOW		32
-#define RTO_MS		200
+#define WINDOW		64	/* frames in flight */
+#define RTO_MIN		40	/* ms: the retransmit timer, between these */
+#define RTO_MAX		2000
+#define RTO_INIT	300
+#define RX_AHEAD	64	/* early frames kept (one ACK bitmap's worth) */
 #define MAX_CONNS	32
 
 enum { F_WHO = 1, F_IAM, F_SYN, F_SYNACK, F_DATA, F_ACK, F_FIN, F_RST };
@@ -33,6 +40,14 @@ struct hdr {
 struct txframe {
 	uint32_t seq;
 	uint16_t len;
+	uint8_t sacked;		/* the peer has it, though earlier ones are missing */
+	uint8_t resent;		/* sent more than once: no round-trip sample from it */
+	uint64_t sent_at;
+	uint8_t data[MAX_PAYLOAD];
+};
+
+struct rxframe {
+	uint16_t len;		/* 0: empty */
 	uint8_t data[MAX_PAYLOAD];
 };
 
@@ -44,15 +59,20 @@ struct conn {
 	int svc;
 	int initiator;
 	/* sending */
-	uint8_t *out;		/* bytes not yet put in frames */
-	size_t out_len, out_cap;
+	uint8_t *out;		/* bytes not yet put in frames: out[out_off .. out_len) */
+	size_t out_off, out_len, out_cap;
 	struct txframe win[WINDOW];
 	int nwin;		/* frames in flight */
 	uint32_t next_seq;	/* seq of the next new frame */
 	uint64_t last_send;
 	int retries;
+	int srtt, rttvar, rto;	/* ms, Jacobson/Karels */
+	uint64_t last_fast;	/* when we last resent a gap the bitmap showed */
+	/* what the link did, for NETSTAT and tuning */
+	uint64_t st_frames, st_bytes, st_resent;
 	/* receiving */
 	uint32_t expect;	/* next seq we want */
+	struct rxframe *ahead;	/* early frames: expect+1 .. expect+RX_AHEAD */
 	uint8_t *in;		/* stream bytes not yet parsed into messages */
 	size_t in_len, in_cap;
 	struct netmsg *q, *q_tail;
@@ -213,6 +233,7 @@ static struct conn *new_conn(void)
 			struct conn *c = &conns[i];
 			memset(c, 0, sizeof *c);
 			c->used = 1;
+			c->rto = RTO_INIT;
 			return c;
 		}
 	return NULL;
@@ -228,6 +249,7 @@ static void free_conn(struct conn *c)
 	}
 	kfree(c->out);
 	kfree(c->in);
+	kfree(c->ahead);
 	c->used = 0;
 }
 
@@ -260,31 +282,121 @@ static void parse_stream(struct conn *c)
 static void pump_out(struct conn *c)
 {
 	/* fill the window with new frames */
-	while (c->state == 2 && c->nwin < WINDOW && c->out_len) {
+	while (c->state == 2 && c->nwin < WINDOW && c->out_len > c->out_off) {
 		struct txframe *f = &c->win[c->nwin++];
-		size_t n = MIN(c->out_len, (size_t)MAX_PAYLOAD);
+		size_t n = MIN(c->out_len - c->out_off, (size_t)MAX_PAYLOAD);
 		f->seq = c->next_seq++;
 		f->len = (uint16_t)n;
-		memcpy(f->data, c->out, n);
-		memmove(c->out, c->out + n, c->out_len - n);
-		c->out_len -= n;
+		f->sacked = f->resent = 0;
+		memcpy(f->data, c->out + c->out_off, n);
+		c->out_off += n;
 		send_frame(c->peer, F_DATA, c->id, f->seq, c->expect, f->data, n);
-		c->last_send = uptime_ms();
+		f->sent_at = c->last_send = uptime_ms();
+		c->st_frames++;
+		c->st_bytes += n;
+	}
+	if (c->out_off == c->out_len)
+		c->out_off = c->out_len = 0;
+	else if (c->out_off > 256 * 1024) {	/* now and then, move what's left down */
+		memmove(c->out, c->out + c->out_off, c->out_len - c->out_off);
+		c->out_len -= c->out_off;
+		c->out_off = 0;
 	}
 }
 
-static void handle_ack(struct conn *c, uint32_t ack)
+static void resend(struct conn *c, struct txframe *f)
 {
+	send_frame(c->peer, F_DATA, c->id, f->seq, c->expect, f->data, f->len);
+	f->sent_at = c->last_send = uptime_ms();
+	f->resent = 1;
+	c->st_resent++;
+}
+
+static void rtt_sample(struct conn *c, int ms)
+{
+	if (ms < 1)
+		ms = 1;
+	if (!c->srtt) {
+		c->srtt = ms;
+		c->rttvar = ms / 2;
+	} else {
+		int err = ms - c->srtt;
+		c->srtt += err / 8;
+		c->rttvar += ((err < 0 ? -err : err) - c->rttvar) / 4;
+	}
+	c->rto = MAX(RTO_MIN, MIN(RTO_MAX, c->srtt + 4 * MAX(c->rttvar, 2)));
+}
+
+/* ack: the peer has everything before it; sack (if have_sack): bit i set
+ * means it also has ack+1+i */
+static void handle_ack2(struct conn *c, uint32_t ack, uint64_t sack, int have_sack)
+{
+	uint64_t now = uptime_ms();
 	/* drop frames the peer has: everything with seq < ack */
 	int drop = 0;
 	while (drop < c->nwin && (int32_t)(c->win[drop].seq - ack) < 0)
 		drop++;
 	if (drop) {
+		struct txframe *last = &c->win[drop - 1];
+		if (!last->resent)
+			rtt_sample(c, (int)(now - last->sent_at));
 		memmove(c->win, c->win + drop, sizeof(struct txframe) * (size_t)(c->nwin - drop));
 		c->nwin -= drop;
 		c->retries = 0;
-		c->last_send = uptime_ms();
+		c->rto = MAX(RTO_MIN, MIN(RTO_MAX, c->srtt ? c->srtt + 4 * MAX(c->rttvar, 2) : RTO_INIT));
 	}
+	if (!have_sack || !sack || !c->nwin)
+		return;
+	/* the bitmap: mark what arrived, and resend the gaps below the highest
+	 * that did, at most once a round trip */
+	int highest = -1;
+	for (int i = 0; i < c->nwin; i++) {
+		int32_t d = (int32_t)(c->win[i].seq - ack) - 1;
+		if (d >= 0 && d < 64 && (sack >> d) & 1) {
+			c->win[i].sacked = 1;
+			highest = i;
+		}
+	}
+	uint64_t gap_age = (uint64_t)MAX(c->srtt, 5);
+	if (highest > 0 && now - c->last_fast >= gap_age) {
+		for (int i = 0; i < highest; i++)
+			if (!c->win[i].sacked && now - c->win[i].sent_at >= gap_age)
+				resend(c, &c->win[i]);
+		c->last_fast = now;
+	}
+}
+
+static void handle_ack(struct conn *c, uint32_t ack)
+{
+	handle_ack2(c, ack, 0, 0);
+}
+
+/* our ACK: what we have, and a bitmap of what we hold beyond it */
+static void send_ack(struct conn *c, const uint8_t *dst)
+{
+	uint64_t sack = 0;
+	if (c->ahead)
+		for (int i = 0; i < RX_AHEAD; i++)
+			if (c->ahead[i].len)
+				sack |= 1ull << i;
+	send_frame(dst, F_ACK, c->id, 0, c->expect, &sack, sizeof sack);
+}
+
+/* the frame we wanted: in it goes, and any early ones that now follow on */
+static int take_in(struct conn *c, const uint8_t *p, size_t len)
+{
+	if (c->in_len + len > c->in_cap) {
+		size_t nc = MAX(c->in_cap * 2, c->in_len + len + 4096);
+		uint8_t *nb = krealloc(c->in, nc);
+		if (!nb)
+			return -1;
+		c->in = nb;
+		c->in_cap = nc;
+	}
+	memcpy(c->in + c->in_len, p, len);
+	c->in_len += len;
+	c->expect++;
+	return 0;
 }
 
 static void spawn_service(struct conn *c);
@@ -359,26 +471,42 @@ static void handle_frame(const uint8_t *buf, int len)
 		c->last_heard = uptime_ms();
 		handle_ack(c, h->ack);
 		if (h->seq == c->expect) {
-			if (c->in_len + h->len > c->in_cap) {
-				size_t nc = MAX(c->in_cap * 2, c->in_len + h->len + 4096);
-				uint8_t *nb = krealloc(c->in, nc);
-				if (!nb)
+			if (take_in(c, p, h->len))
+				break;
+			/* early frames that follow on */
+			while (c->ahead && c->ahead[0].len) {
+				struct rxframe f0 = c->ahead[0];
+				memmove(c->ahead, c->ahead + 1, sizeof(struct rxframe) * (RX_AHEAD - 1));
+				c->ahead[RX_AHEAD - 1].len = 0;
+				if (take_in(c, f0.data, f0.len))
 					break;
-				c->in = nb;
-				c->in_cap = nc;
 			}
-			memcpy(c->in + c->in_len, p, h->len);
-			c->in_len += h->len;
-			c->expect++;
+			if (c->ahead && !c->ahead[0].len) {
+				/* the slots are relative to expect: shift past the gap's slot */
+				memmove(c->ahead, c->ahead + 1, sizeof(struct rxframe) * (RX_AHEAD - 1));
+				c->ahead[RX_AHEAD - 1].len = 0;
+			}
 			parse_stream(c);
+		} else if ((int32_t)(h->seq - c->expect) > 0 && (int32_t)(h->seq - c->expect) <= RX_AHEAD) {
+			/* early: keep it for when the gap is filled */
+			if (!c->ahead)
+				c->ahead = kzalloc(sizeof(struct rxframe) * RX_AHEAD);
+			int k = (int)(h->seq - c->expect) - 1;
+			if (c->ahead && h->len) {
+				c->ahead[k].len = h->len;
+				memcpy(c->ahead[k].data, p, h->len);
+			}
 		}
-		send_frame(h->src, F_ACK, h->conn, 0, c->expect, NULL, 0);
+		send_ack(c, h->src);
 		break;
 	case F_ACK:
 		c = find_conn(h->src, h->conn);
 		if (c) {
 			c->last_heard = uptime_ms();
-			handle_ack(c, h->ack);
+			uint64_t sack = 0;
+			if (h->len >= 8)
+				memcpy(&sack, p, 8);
+			handle_ack2(c, h->ack, sack, h->len >= 8);
 		}
 		break;
 	case F_FIN:
@@ -418,14 +546,15 @@ static void timers(void)
 		if (c->state != 2)
 			continue;
 		pump_out(c);
-		if (c->nwin && now - c->last_send > RTO_MS) {
-			/* go back N: resend everything in flight */
+		if (c->nwin && now - c->win[0].sent_at > (uint64_t)c->rto) {
+			/* overdue: resend what the peer hasn't said it has, and wait
+			 * longer next time (the link may just be slow) */
 			for (int k = 0; k < c->nwin; k++)
-				send_frame(c->peer, F_DATA, c->id, c->win[k].seq, c->expect,
-				    c->win[k].data, c->win[k].len);
-			c->last_send = now;
-			if (++c->retries > 50)
-				c->state = 3;	/* ~10 s of silence: the peer is gone */
+				if (!c->win[k].sacked && now - c->win[k].sent_at > (uint64_t)c->rto)
+					resend(c, &c->win[k]);
+			c->rto = MIN(RTO_MAX, c->rto * 2);
+			if (++c->retries > 12 && now - c->last_heard > 10000)
+				c->state = 3;	/* ten seconds of silence: the peer is gone */
 		}
 	}
 }
@@ -516,9 +645,41 @@ int conn_send2(struct conn *c, int type, const void *a, size_t alen, const void 
 	c->out_len += 5 + alen + blen;
 	pump_out(c);
 	/* don't let one sender run unboundedly ahead of the wire */
-	while (c->state == 2 && c->out_len > 512 * 1024)
+	while (c->state == 2 && c->out_len - c->out_off > 512 * 1024)
 		task_idle();
 	return 0;
+}
+
+/* bytes queued or in flight: a sender with choices (the screen) waits for
+ * this to come down rather than piling more on */
+size_t conn_backlog(struct conn *c)
+{
+	return c->state == 2 ? c->out_len - c->out_off + (size_t)c->nwin * MAX_PAYLOAD : 0;
+}
+
+/* NETSTAT: the BDNET connections, how they're doing */
+void bdnet_list(void (*fn)(const char *line, void *arg), void *arg)
+{
+	for (int i = 0; i < MAX_CONNS; i++) {
+		struct conn *c = &conns[i];
+		if (!c->used || c->state != 2)
+			continue;
+		char line[160];
+		snprintf(line, sizeof line, "  BDNET  %-8s %s \\\\%-16s  round trip %d ms, %llu KB sent, %llu of %llu frames resent",
+		    c->svc == 'T' ? "shell" : c->svc == 'D' ? "desktop" : c->svc == 'F' ? "files" : "other", c->initiator ? "to  " : "from",
+		    c->peer_name[0] ? c->peer_name : "?", c->srtt, (unsigned long long)(c->st_bytes / 1024),
+		    (unsigned long long)c->st_resent, (unsigned long long)c->st_frames);
+		fn(line, arg);
+	}
+}
+
+/* frames sent, bytes sent, frames resent, round trip (ms) */
+void conn_stats(struct conn *c, uint64_t *frames, uint64_t *bytes, uint64_t *resent, int *rtt)
+{
+	*frames = c->st_frames;
+	*bytes = c->st_bytes;
+	*resent = c->st_resent;
+	*rtt = c->srtt;
 }
 
 int conn_send(struct conn *c, int type, const void *data, size_t len)

@@ -130,6 +130,22 @@ try:
         vm.cmd("ver", "bdos version")
     check("bterm: a DOS game sees a held key", desktop_game)
 
+    def bench():
+        # a bad network (40 ms each way, 2% lost): a dragged window still
+        # catches up quickly, and the updates come squashed
+        r = subprocess.run([BTERM, "--bench", "--delay", "40", "--loss", "2", f"127.0.0.1:{PORT}"],
+                           capture_output=True, timeout=300, env=SDL_ENV, stdin=subprocess.DEVNULL, cwd=SHARE)
+        out = r.stdout.decode(errors="replace")
+        open(os.path.join(OUTDIR, "bench.txt"), "w").write(out)
+        m = re.search(r"BENCH drag: (\d+) updates, (\d+) KB, settled (\d+) ms", out)
+        assert m, out + r.stderr.decode(errors="replace")
+        updates, kb, settle = map(int, m.groups())
+        assert settle < 1000 and updates >= 20 and kb / updates < 30, out
+        assert "BENCH typing" in out, out
+        time.sleep(1)
+        vm.cmd("ver", "bdos version")
+    check("bterm on a bad network: a drag catches up quickly", bench)
+
     def list_and_password():
         r = bterm("-l", f"127.0.0.1:{PORT}")
         assert b"\\\\BDOS-" in r.stdout, r.stdout

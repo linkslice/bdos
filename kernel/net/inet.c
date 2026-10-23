@@ -935,6 +935,7 @@ int netstat_run(void)
 	int n = 0;
 	kprintf("Active connections:\n");
 	tcp_list(ns_line, &n);
+	bdnet_list(ns_line, &n);
 	if (!n)
 		kprintf("  (none)\n");
 	return 0;

@@ -13,9 +13,11 @@
 #include "../vfs.h"
 #include "../gui/wm.h"
 #include "net.h"
+#include "../lz.h"
 
 enum {
 	M_KEY = 1, M_OUT, M_CTRL, M_EV, M_PIX, M_FREQ, M_FREP, M_BYE, M_PTR,
+	M_PIXZ,		/* M_PIX's payload squashed (lz.c): u32 its length, then the block */
 };
 
 enum { C_CLEAR = 1, C_GOTO, C_ATTR, C_CURSOR };
@@ -26,6 +28,7 @@ enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAM
 #define HELLO_SHARE	1
 #define HELLO_CMD	2	/* run this one command and hang up (CPU \\HOST cmd) */
 #define HELLO_POINTER	2
+#define HELLO_LZ	4	/* the viewer understands M_PIXZ */
 
 struct hello {
 	int32_t w, h;		/* columns/rows (TTY) or pixels (DESK) */
@@ -592,9 +595,32 @@ struct rdisp {
 	struct surface surf;
 	struct conn *c;
 	uint32_t *rowbuf;
+	/* what changed and hasn't gone yet: sent when the link has room, so a
+	 * slow link gets fewer, fresher pictures instead of a growing queue */
+	struct rect pend[16];
+	int npend;
+	int lz;			/* the viewer takes M_PIXZ */
+	uint32_t *ztab;
+	uint8_t *zbuf;
 };
 
+/* how much may be queued or in flight before new pictures wait */
+#define PIX_BACKLOG (64 * 1024)
+
 #define PIX_MAX_RUNS 8192
+
+static void rd_send_rect(struct rdisp *rd, struct rect r);
+
+/* send what's changed, if the link has room for it */
+static void rd_send_pending(struct rdisp *rd)
+{
+	if (!rd->npend || conn_backlog(rd->c) > PIX_BACKLOG)
+		return;
+	int n = rd->npend;
+	rd->npend = 0;
+	for (int i = 0; i < n; i++)
+		rd_send_rect(rd, rd->pend[i]);
+}
 
 static void rd_flush(struct display *d, struct rect r)
 {
@@ -603,11 +629,43 @@ static void rd_flush(struct display *d, struct rect r)
 		d->alive = 0;
 		return;
 	}
-	/* run-length encode in bands so each message stays reasonable */
-	struct { uint16_t n; uint32_t rgb; } __attribute__((packed)) *runs =
-	    kmalloc(sizeof(*runs) * PIX_MAX_RUNS);
-	if (!runs)
+	r = rect_isect(r, (struct rect){ 0, 0, rd->surf.w, rd->surf.h });
+	if (rect_empty(r))
 		return;
+	/* fold it into what's waiting: into one it overlaps, or a new one */
+	int merged = 0;
+	for (int i = 0; i < rd->npend && !merged; i++) {
+		struct rect u = rect_union(rd->pend[i], r);
+		long ua = (long)u.w * u.h, sum = (long)rd->pend[i].w * rd->pend[i].h + (long)r.w * r.h;
+		if (!rect_empty(rect_isect(rd->pend[i], r)) || ua <= sum + sum / 4) {
+			rd->pend[i] = u;
+			merged = 1;
+		}
+	}
+	if (!merged) {
+		if (rd->npend == (int)NELEM(rd->pend)) {
+			for (int i = 1; i < rd->npend; i++)
+				rd->pend[0] = rect_union(rd->pend[0], rd->pend[i]);
+			rd->npend = 1;
+			rd->pend[0] = rect_union(rd->pend[0], r);
+		} else {
+			rd->pend[rd->npend++] = r;
+		}
+	}
+	rd_send_pending(rd);
+}
+
+static void rd_send_rect(struct rdisp *rd, struct rect r)
+{
+	r = rect_isect(r, (struct rect){ 0, 0, rd->surf.w, rd->surf.h });	/* it may have shrunk since */
+	if (rect_empty(r))
+		return;
+	/* run-length encode in bands so each message stays reasonable; the
+	 * header goes just in front of the runs, so the two squash together */
+	uint8_t *msg = kmalloc(16 + 6 * PIX_MAX_RUNS);
+	if (!msg)
+		return;
+	struct { uint16_t n; uint32_t rgb; } __attribute__((packed)) *runs = (void *)(msg + 16);
 	int y = r.y;
 	while (y < r.y + r.h) {
 		int nruns = 0, y0 = y;
@@ -629,14 +687,24 @@ static void rd_flush(struct display *d, struct rect r)
 			}
 		}
 		int32_t hdr[4] = { r.x, y0, r.w, y - y0 };
-		conn_send2(rd->c, M_PIX, hdr, sizeof hdr, runs, sizeof(*runs) * (size_t)nruns);
+		memcpy(msg, hdr, 16);
+		size_t raw = 16 + sizeof(*runs) * (size_t)nruns, z = 0;
+		if (rd->lz && rd->zbuf)
+			z = lz_compress(msg, raw, rd->zbuf, lz_bound(16 + 6 * PIX_MAX_RUNS), rd->ztab);
+		if (z && z + 4 < raw) {
+			uint32_t rl = (uint32_t)raw;
+			conn_send2(rd->c, M_PIXZ, &rl, 4, rd->zbuf, z);
+		} else {
+			conn_send2(rd->c, M_PIX, msg, raw, NULL, 0);
+		}
 	}
-	kfree(runs);
+	kfree(msg);
 }
 
 static int rd_event(struct display *d, struct event *e)
 {
 	struct rdisp *rd = (struct rdisp *)d;
+	rd_send_pending(rd);	/* the desktop asks often: a good time to catch up */
 	if (!conn_alive(rd->c)) {
 		d->alive = 0;
 		return 0;
@@ -695,6 +763,11 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	rd->d.next_event = rd_event;
 	rd->d.alive = 1;
 	rd->d.draws_pointer = (h.flags & HELLO_POINTER) != 0;
+	if (h.flags & HELLO_LZ) {
+		rd->ztab = kmalloc(sizeof(uint32_t) * LZ_TABLE_WORDS);
+		rd->zbuf = kmalloc(lz_bound(16 + 6 * PIX_MAX_RUNS));
+		rd->lz = rd->ztab && rd->zbuf;
+	}
 	rd->d.pointer = rd_pointer;
 	rd->d.name = "network";
 
@@ -716,6 +789,8 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	if (tdr)
 		rfs_free(tdr);
 	surf_free(&rd->surf);
+	kfree(rd->ztab);
+	kfree(rd->zbuf);
 	kfree(rd);
 }
 
@@ -858,7 +933,7 @@ int remote_desktop(const char *host)
 	if (d->attach)
 		d->attach(d, NULL);
 	struct hello h;
-	make_hello(&h, d->surf->w, d->surf->h, d->draws_pointer ? HELLO_POINTER : 0);
+	make_hello(&h, d->surf->w, d->surf->h, (d->draws_pointer ? HELLO_POINTER : 0) | HELLO_LZ);
 	char share[VFS_PATH_MAX];
 	strncpy0(share, task_current()->cwd, sizeof share);
 
@@ -879,13 +954,27 @@ int remote_desktop(const char *host)
 	while (!done && d->alive) {
 		int busy = 0;
 		struct netmsg *m;
-		while ((m = conn_take(c, MSG(M_PIX) | MSG(M_FREQ) | MSG(M_BYE)))) {
+		while ((m = conn_take(c, MSG(M_PIX) | MSG(M_PIXZ) | MSG(M_FREQ) | MSG(M_BYE)))) {
 			busy = 1;
-			if (m->type == M_PIX && m->len >= 16) {
+			const uint8_t *pd = m->data;
+			size_t plen = m->len;
+			uint8_t *unz = NULL;
+			if (m->type == M_PIXZ && m->len > 4) {
+				uint32_t rl;
+				memcpy(&rl, m->data, 4);
+				unz = rl <= 16 + 6 * PIX_MAX_RUNS ? kmalloc(rl) : NULL;
+				long got = unz ? lz_decompress(m->data + 4, m->len - 4, unz, rl) : -1;
+				if (got == (long)rl) {
+					pd = unz;
+					plen = rl;
+					m->type = M_PIX;
+				}
+			}
+			if (m->type == M_PIX && plen >= 16) {
 				int32_t r[4];
-				memcpy(r, m->data, sizeof r);
-				const uint8_t *p = m->data + 16;
-				size_t nruns = (m->len - 16) / 6;
+				memcpy(r, pd, sizeof r);
+				const uint8_t *p = pd + 16;
+				size_t nruns = (plen - 16) / 6;
 				int x = 0, y = 0;
 				struct surface *s = d->surf;
 				for (size_t i = 0; i < nruns; i++) {
@@ -911,6 +1000,7 @@ int remote_desktop(const char *host)
 			} else if (m->type == M_BYE) {
 				done = 1;
 			}
+			kfree(unz);
 			kfree(m);
 		}
 		struct event e;

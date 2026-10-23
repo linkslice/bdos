@@ -56,6 +56,9 @@ struct netmsg *conn_take(struct conn *c, uint32_t mask);
 /* same, waiting up to ms (or forever if ms < 0) */
 struct netmsg *conn_wait(struct conn *c, uint32_t mask, int ms);
 int conn_alive(struct conn *c);
+size_t conn_backlog(struct conn *c);
+void bdnet_list(void (*fn)(const char *line, void *arg), void *arg);
+void conn_stats(struct conn *c, uint64_t *frames, uint64_t *bytes, uint64_t *resent, int *rtt);
 void conn_close(struct conn *c);
 const char *conn_peer(struct conn *c);
 void *conn_user(struct conn *c);

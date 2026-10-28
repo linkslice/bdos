@@ -37,6 +37,7 @@
 #define ROM_EXIT	0x08D0	/* a program's last RET lands here */
 #define ROM_IDLE	0x08E0	/* HLT loop */
 #define ROM_VBE_BANK	0x08F0	/* VESA window function */
+#define ROM_VGA_FUNCS	0x0900	/* INT 10h 1Bh: the static functionality table */
 #define ROM_SYSCONF	0xE6F5	/* INT 15h C0h: the system configuration table */
 #define ROM_DUMMY_IRET	0xFF53	/* where unused vectors point, as on a real BIOS */
 #define ROM_PM_STUBS	0x1000	/* DPMI protected-mode interrupt stubs: 256 x 4 */
@@ -136,6 +137,13 @@ struct mouse {
 	struct { uint16_t ev, buttons; int16_t x, y; } q[16];
 	int qh, qt;
 	int latched;		/* presses function 3 hasn't reported yet */
+	uint64_t motion_read;	/* when the program last asked how far it moved (0Bh) */
+	int fx, fy;		/* captured: where the driver has the pointer, in eighths */
+	int ratio_x, ratio_y;	/* mickeys per 8 pixels (0Fh): 8 and 16 */
+	int sens_x, sens_y, sens_dbl;	/* sensitivity (1Ah), 50 is as it comes */
+	/* the program's own graphics cursor (09h): AND and XOR masks, hot spot */
+	int cur_set, hot_x, hot_y;
+	uint16_t cur_and[16], cur_xor[16];
 	int in_handler;
 	uint32_t saved[8];
 	uint16_t saved_ds, saved_es;
@@ -211,6 +219,10 @@ struct dosbox {
 	int input_wait;		/* the BIOS or DOS is waiting for a key */
 	int stream;		/* program output goes to the console as text */
 	int said_no_graphics;
+	/* the last picture shown in a display, so only what changed goes out */
+	uint32_t *shadow;
+	int shadow_w, shadow_h;
+	const uint32_t *shadow_of;
 	int last_w, last_h;	/* the mode the display was last sized for */
 	int raw_ctrl, raw_alt;
 	int state_req;		/* 1 save, 2 load, at the next chance */
@@ -278,6 +290,8 @@ void bios_set_cursor(struct dosbox *b, int x, int y);
 void bios_tty(struct dosbox *b, uint8_t ch);
 int bios_key_avail(struct dosbox *b);
 uint16_t bios_key_get(struct dosbox *b);
+void mouse_motion(struct dosbox *b, int dx, int dy, int buttons);
+int mouse_wants_capture(struct dosbox *b);
 void mouse_event(struct dosbox *b, int x, int y, int buttons);
 struct rect vga_fit(struct rect area, int w, int h);	/* where a w x h picture goes */
 void dosbox_crash_dump(struct dosbox *b, uint16_t cs, uint32_t ip);
@@ -299,6 +313,7 @@ void xms_entry(struct dosbox *b);
 uint16_t mcb_alloc(struct dosbox *b, uint16_t paras, uint16_t owner, uint16_t *largest);
 int mcb_free(struct dosbox *b, uint16_t seg);
 int mcb_resize(struct dosbox *b, uint16_t seg, uint16_t paras, uint16_t *largest);
+void dos_con_out(struct dosbox *b, uint8_t ch);	/* standard output: the screen, or > a file */
 void dos_print(struct dosbox *b, const char *s);	/* to the program's screen */
 
 /* dpmi.c */

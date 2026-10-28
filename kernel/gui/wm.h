@@ -14,6 +14,24 @@ struct event {
 	int key;
 };
 
+/*
+ * Pointer events carry more than the place, in bits of buttons above the
+ * modifiers:
+ *   EVB_DELTA  key holds how far the mouse itself moved (dx in the low 16
+ *              bits, dy in the high, signed): a relative mouse, or bterm with
+ *              the pointer captured. x, y stay where the pointer is drawn.
+ *   EVB_REL    x, y are the motion, not a place: what a window that has
+ *              captured the pointer (a DOS game) is given.
+ */
+#define EVB_DELTA	0x1000
+#define EVB_REL		0x2000
+static inline int ev_dx(const struct event *e) { return (int16_t)(e->key & 0xFFFF); }
+static inline int ev_dy(const struct event *e) { return (int16_t)((uint32_t)e->key >> 16); }
+static inline int ev_delta(int dx, int dy) { return (int)((uint32_t)(uint16_t)dx | (uint32_t)(uint16_t)dy << 16); }
+
+/* display->pointer(): the pointer is captured -- hide it, and send motion */
+#define PTR_CAPTURED	0x100
+
 #define EVQ_SIZE 128
 struct evq {
 	struct event e[EVQ_SIZE];
@@ -47,6 +65,12 @@ struct display {
 	 * another desktop): hold this while drawing into them */
 	void (*lock)(struct display *d);
 	void (*unlock)(struct display *d);
+	/* optional: the far end is still taking in earlier pictures. Something
+	 * drawing a new one many times a second (a game) skips a frame instead */
+	int (*busy)(struct display *d);
+	/* set by what draws into the display: it reads the mouse's motion, not
+	 * its place (a 3D game), so a click in it should capture the pointer */
+	volatile int wants_capture;
 	const char *name;
 	void *priv;
 	/* the far end draws for itself: windows' surfaces are mirrored there */
@@ -57,5 +81,6 @@ int desktop_run_on(struct display *d, const char *title);
 /* around drawing straight into a display's surface (a DOS game, a viewer) */
 void display_lock(struct display *d);
 void display_unlock(struct display *d);
+int display_busy(struct display *d);
 
 #endif

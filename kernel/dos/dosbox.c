@@ -183,6 +183,7 @@ void dosbox_set_graphics(struct dosbox *b, int on)
 			return;
 		}
 		b->disp = d;
+		b->shadow_of = NULL;	/* all of the first picture goes */
 		b->mouse_possible = 1;
 		b->vga.dirty = 1;
 		b->last_w = b->last_h = 0;
@@ -202,6 +203,65 @@ void dosbox_set_graphics(struct dosbox *b, int on)
 	}
 }
 
+/*
+ * After drawing a frame into the display: pass on only the rows that changed
+ * since the last one (and only the columns that did, in them). A game
+ * redrawing the whole screen every frame mostly changes part of it (a status
+ * bar stays put; a menu sits still), and a text screen redrawn for its
+ * blinking cursor changes a few cells -- which matters a lot when the
+ * display is a window across the network.
+ */
+static void show_band(struct surface *s, struct display *d, struct rect *band)
+{
+	surf_touched(s, *band);
+	d->flush(d, *band);
+	*band = (struct rect){ 0, 0, 0, 0 };
+}
+
+static void show_changes(struct dosbox *b, struct display *d)
+{
+	struct surface *s = d->surf;
+	if (!b->shadow || b->shadow_w != s->w || b->shadow_h != s->h || b->shadow_of != s->px) {
+		kfree(b->shadow);
+		b->shadow = kmalloc((size_t)s->w * (size_t)s->h * 4);
+		b->shadow_w = s->w;
+		b->shadow_h = s->h;
+		b->shadow_of = s->px;
+		struct rect all = { 0, 0, s->w, s->h };
+		if (b->shadow)
+			for (int y = 0; y < s->h; y++)
+				memcpy(b->shadow + (size_t)y * (size_t)s->w, s->px + (size_t)y * (size_t)s->pitch, (size_t)s->w * 4);
+		surf_touched(s, all);
+		d->flush(d, all);
+		return;
+	}
+	struct rect band = { 0, 0, 0, 0 };
+	for (int y = 0; y < s->h; y++) {
+		uint32_t *row = s->px + (size_t)y * (size_t)s->pitch, *old = b->shadow + (size_t)y * (size_t)s->w;
+		if (!memcmp(row, old, (size_t)s->w * 4)) {
+			if (!rect_empty(band))
+				show_band(s, d, &band);
+			continue;
+		}
+		int x0 = 0, x1 = s->w - 1;
+		while (row[x0] == old[x0])
+			x0++;
+		while (row[x1] == old[x1])
+			x1--;
+		memcpy(old + x0, row + x0, (size_t)(x1 - x0 + 1) * 4);
+		struct rect r = { x0, y, x1 - x0 + 1, 1 };
+		if (!rect_empty(band) && band.h < 64) {
+			band = rect_union(band, r);
+		} else {
+			if (!rect_empty(band))
+				show_band(s, d, &band);
+			band = r;
+		}
+	}
+	if (!rect_empty(band))
+		show_band(s, d, &band);
+}
+
 static void frame(struct dosbox *b)
 {
 	int gfx = !vga_is_text(b) || (b->mouse.on && b->mouse.shown > 0 && b->disp);
@@ -211,6 +271,7 @@ static void frame(struct dosbox *b)
 		dosbox_set_graphics(b, 0);
 	if (b->disp) {
 		struct display *d = b->disp;
+		d->wants_capture = mouse_wants_capture(b);
 		int w, h;
 		vga_screen_size(b, &w, &h);
 		if (w != b->last_w || h != b->last_h) {
@@ -226,9 +287,18 @@ static void frame(struct dosbox *b)
 			b->last_w = w;
 			b->last_h = h;
 			b->vga.dirty = 1;
+			b->shadow_of = NULL;
 		}
 		int text_blink = vga_is_text(b);
 		if (!b->vga.dirty && !text_blink && !(b->mouse.on && b->mouse.shown > 0))
+			return;
+		/* a viewer across the network still taking in the last frame: skip
+		 * this one (it stays dirty), so the picture keeps up instead of
+		 * queueing, and the game never waits for the network */
+		bkl_enter();
+		int busy = display_busy(d);
+		bkl_leave();
+		if (busy)
 			return;
 		bkl_enter();
 		display_lock(d);	/* the pixels may be a window's on a desktop */
@@ -236,8 +306,7 @@ static void frame(struct dosbox *b)
 			struct rect area = { 0, 0, d->surf->w, d->surf->h };
 			vga_render(b, d->surf, area);
 			mouse_draw(b, d->surf, area);
-			surf_touched(d->surf, area);	/* pixels, for a viewer that draws for itself */
-			d->flush(d, area);
+			show_changes(b, d);
 		}
 		display_unlock(d);
 		bkl_leave();
@@ -418,6 +487,16 @@ void dosbox_poll(struct dosbox *b)
 				b->vga.dirty = 1;
 				break;
 			case EV_MOVE: case EV_DOWN: case EV_UP: {
+				if (e.buttons & EVB_REL) {	/* the pointer's captured: motion */
+					mouse_motion(b, e.x, e.y, e.buttons & 7);
+					break;
+				}
+				if ((e.buttons & EVB_DELTA) && mouse_wants_capture(b)) {
+					/* the whole screen, and a mouse that says how far it
+					 * went: a game turns as far as you like, edges or not */
+					mouse_motion(b, ev_dx(&e), ev_dy(&e), e.buttons & 7);
+					break;
+				}
 				/* window pixels to the program's mouse coordinates */
 				int w, h;
 				vga_screen_size(b, &w, &h);
@@ -804,6 +883,7 @@ static int dosbox_run(const char *path, int argc, char **argv, const char *state
 	dpmi_free(b);
 	sb_free(b);
 	vga_free(b);
+	kfree(b->shadow);
 	kfree(c->mem);
 	kfree(b);
 	return code;

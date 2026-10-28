@@ -182,6 +182,10 @@ everywhere: the Control Panel, `CONTROL key=value` at the prompt, or the
   (files, FCBs, EXEC, XMS, environment and `COMMAND.COM /C`).
 - A VGA: text modes, mode 13h, planar 16-colour modes, mode X and VESA
   banked modes, in a window or full screen; an INT 33h mouse.
+- Games that turn with the mouse (Doom): click in the window and the pointer
+  is captured -- hidden, with all of the mouse's motion going to the game, so
+  it keeps turning past the window's edge. Ctrl+Alt lets go (the title bar
+  says so). Programs that follow the pointer, like Lemmings, aren't captured.
 - A Sound Blaster 16 (DSP 4.05, 8- and 16-bit DMA, IRQ 7) and an OPL2 FM
   synthesizer, played through the sound card (`BLASTER=A220 I7 D1 H5 T6`).
 - A DPMI 0.9 host, so DOS/4GW-style 32-bit programs run.

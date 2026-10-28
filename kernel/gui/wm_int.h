@@ -59,6 +59,8 @@ struct termwin {
 	int hold;		/* keep the window after the command ends */
 	int child;		/* a nested desktop or remote view owns the pixels */
 	struct evq child_ev;
+	struct display *child_disp;	/* that display, while it's open */
+	volatile int want_capture;	/* a desktop inside captured the pointer: so should we */
 	/* scrollback: lines gone off the top, oldest first in a ring */
 	uint16_t **sb;
 	uint16_t *sblen;
@@ -205,6 +207,9 @@ struct wm {
 	int rs_mx, rs_my;
 	int ptr;		/* pointer shape: 0 arrow, else resize edges */
 	struct win *grab;	/* the window that got the button press */
+	struct win *capture;	/* the window the pointer is captured in (a game), till Ctrl+Alt */
+	int cap_x, cap_y;	/* where the pointer was, to measure motion from */
+	int cap_nested;		/* captured because a desktop inside asked */
 	struct popup *popup;
 	struct win *kbmove;	/* Move/Size from the keyboard: the window, and 1 move or 2 size */
 	int kbmode;

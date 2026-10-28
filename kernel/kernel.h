@@ -232,6 +232,7 @@ void shell_task(void *arg);		/* arg: optional command line to run */
 int shell_exec(const char *line);	/* run one command in the current task */
 int read_line(char *buf, size_t cap);	/* line editor; -1 at end of input */
 int stdin_is_pipe(void);
+int stdout_is_redirected(void);
 int resolve_path(const char *in, char *out, size_t n);	/* against task cwd */
 void kernel_late_init(void);
 

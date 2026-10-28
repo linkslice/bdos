@@ -731,6 +731,23 @@ def t_dosgfx(vm):
     assert 20 <= n <= 35, out
     assert "KEYHOLD mouse: 240,150" in out, out
     assert re.search(r"events [1-9]", out), out          # its event handler ran, and returned
+    # the corners of the BIOS and mouse driver: stuffing keys, the display's
+    # state, the mouse's settings, a keyboard hook on INT 15h that swallows
+    # a key, and the grey arrows as DOS reads them (0, then the scan code)
+    # (with the mouse on, a text program is drawn as pixels: its words go to a file)
+    start = len(vm.log)
+    vm.send("biosapi > bapi.txt\r")
+    time.sleep(4)
+    vm.keys("a")
+    time.sleep(0.3)
+    vm.keys("b")
+    time.sleep(0.5)
+    vm.keys("up")
+    time.sleep(2)
+    vm.wait_for("C:\\DOSAPPS>", 15, start)
+    out = vm.cmd("type bapi.txt")
+    assert re.search(r"stuff ok full ok vga ok mouse ok ready hook b arrow 00000048", re.sub(r"\s+", " ", out)), out[-400:]
+    vm.cmd("del bapi.txt")
     vm.keys("alt-x")
     time.sleep(0.8)
     vm.keys("ret")
@@ -1328,6 +1345,33 @@ def t_ps2mouse(vm2):
     time.sleep(0.4)
     _, (x2, y2) = vm2.windows()
     assert (x2, y2) == (x + 100, y - 50), f"PS/2 mouse went {(x, y)} -> {(x2, y2)}"
+    # a game that turns with the mouse: a click captures the pointer, and the
+    # mouse's motion all goes to it -- far more than the window is wide --
+    # until Ctrl+Alt lets go; after that, moving doesn't turn it
+    vm2.cmd("cd \\dosapps")
+    wins, (px, py) = vm2.windows()
+    sx, sy, sw, sh = wins["Shell"]
+    vm2.mon(f"mouse_move {sx + sw // 2 - px} {sy + sh // 2 - py}")
+    start = len(vm2.log)
+    vm2.send("turn\r")
+    time.sleep(3)
+    vm2.mon("mouse_button 1")
+    vm2.mon("mouse_button 0")
+    time.sleep(1)
+    for _ in range(30):
+        vm2.mon("mouse_move 100 0")
+    time.sleep(1)
+    vm2.mon("sendkey ctrl-alt")
+    time.sleep(1)
+    for _ in range(5):
+        vm2.mon("mouse_move -100 0")
+    time.sleep(1)
+    vm2.keys("spc")
+    vm2.wait_for("TURN: mickeys", 15, start)
+    out = vm2.settle(start)
+    mx = int(re.search(r"TURN: mickeys (-?\d+)", out).group(1))
+    assert mx >= 2500, out[-300:]                  # 3000 to the right, captured
+    vm2.cmd("cd \\")
 
 
 if suite("ps2mouse"):

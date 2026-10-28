@@ -77,11 +77,31 @@ static uint32_t ds_dx(struct x86 *c)
 	return c->s[S_DS].base + DX(c);
 }
 
+/*
+ * A character to standard output, the way DOS would: through the BIOS to
+ * the screen -- or, when it's redirected to a file or a pipe, there and only
+ * there, whatever the screen is doing (a program that turned the mouse on,
+ * or went into graphics, still writes its > file).
+ */
+void dos_con_out(struct dosbox *b, uint8_t ch)
+{
+	if (!stdout_is_redirected()) {
+		bios_tty(b, ch);
+		return;
+	}
+	if (ch == '\r')
+		return;			/* the console's newline does both */
+	if (ch == '\n' || ch == '\b' || ch == '\t' || ch == 7 || (ch >= 0x20 && ch < 0x80 && ch != 0x7F))
+		con_putc((char)ch);
+	else
+		con_rawchar(ch);
+}
+
 /* program text to the screen, the way DOS would (through the BIOS) */
 void dos_print(struct dosbox *b, const char *s)
 {
 	while (*s)
-		bios_tty(b, (uint8_t)*s++);
+		dos_con_out(b, (uint8_t)*s++);
 }
 
 /* ---- paths ----------------------------------------------------------------------- */
@@ -652,6 +672,16 @@ static int open_file(struct dosbox *b, const char *dospath, int mode, int create
 /* ---- console input --------------------------------------------------------------- */
 
 /* the next key as (scan << 8 | ascii), or -1 */
+/* a key as DOS reads it: INT 16h's old call, so the grey arrows are 0 and a
+ * scan code like the keypad's, not E0h (which is a character to a program) */
+static uint16_t dos_key_get(struct dosbox *b)
+{
+	uint16_t k = bios_key_get(b);
+	if ((k & 0xFF) == 0xE0 && k >> 8)
+		k &= 0xFF00;
+	return k;
+}
+
 static int con_key2(struct dosbox *b)
 {
 	if (stdin_is_pipe()) {
@@ -665,7 +695,7 @@ static int con_key2(struct dosbox *b)
 		dosbox_input_wait(b);
 		return -1;
 	}
-	return bios_key_get(b);
+	return dos_key_get(b);
 }
 
 /* ^C: what INT 23h would do */
@@ -702,7 +732,7 @@ static int read_char_fn(struct dosbox *b, int echo, int brk)
 		b->pending_scan = (k >> 8) & 0xFF;
 	setlo(c, R_EAX, a);
 	if (echo && a)
-		bios_tty(b, a);
+		dos_con_out(b, a);
 	return 0;
 }
 
@@ -718,7 +748,7 @@ static int read_line_fn(struct dosbox *b, int max)
 			return -1;
 		if (a == '\r') {
 			b->line[b->line_len] = 0;
-			bios_tty(b, '\r');
+			dos_con_out(b, '\r');
 			return 0;
 		}
 		if (a == 8) {
@@ -741,7 +771,7 @@ static int read_line_fn(struct dosbox *b, int max)
 		}
 		if (a >= 0x20 && b->line_len < max - 1 && b->line_len < (int)sizeof b->line - 2) {
 			b->line[b->line_len++] = (char)a;
-			bios_tty(b, a);
+			dos_con_out(b, a);
 		}
 	}
 }
@@ -753,7 +783,7 @@ static long dev_write(struct dosbox *b, int dev, uint32_t buf, uint32_t n)
 	struct x86 *c = &b->cpu;
 	if (dev == DEV_CON) {
 		for (uint32_t i = 0; i < n; i++)
-			bios_tty(b, x86_rd8(c, buf + i));
+			dos_con_out(b, x86_rd8(c, buf + i));
 		return (long)n;
 	}
 	return (long)n;		/* NUL, AUX, PRN: swallowed */
@@ -778,7 +808,7 @@ static int do_read(struct dosbox *b, int h, uint32_t buf, uint32_t n, long *got)
 			}
 			b->line[b->line_len++] = '\r';
 			b->line[b->line_len++] = '\n';
-			bios_tty(b, '\n');
+			dos_con_out(b, '\n');
 			b->line_done = 1;
 			b->line_pos = 0;
 		}
@@ -1734,7 +1764,7 @@ static int int21(struct dosbox *b)
 			vfs_write(b->sft[i].f, &tmp, 1);
 			(void)put;
 		} else {
-			bios_tty(b, ch);
+			dos_con_out(b, ch);
 		}
 		setlo(c, R_EAX, ch);
 		break;
@@ -1749,7 +1779,7 @@ static int int21(struct dosbox *b)
 				b->pending_scan = -1;
 				bios_set_flag(c, FL_ZF, 0);
 			} else if (bios_key_avail(b)) {
-				uint16_t k = bios_key_get(b);
+				uint16_t k = dos_key_get(b);
 				setlo(c, R_EAX, (uint8_t)k);
 				if (!(k & 0xFF))
 					b->pending_scan = k >> 8;
@@ -1760,7 +1790,7 @@ static int int21(struct dosbox *b)
 				b->idle_polls++;
 			}
 		} else {
-			bios_tty(b, DL(c));
+			dos_con_out(b, DL(c));
 		}
 		break;
 	case 0x07: case 0x08:
@@ -1775,7 +1805,7 @@ static int int21(struct dosbox *b)
 			if (i >= 0 && !b->sft[i].dev)
 				vfs_write(b->sft[i].f, &ch, 1);
 			else
-				bios_tty(b, ch);
+				dos_con_out(b, ch);
 		}
 		setlo(c, R_EAX, '$');
 		break;

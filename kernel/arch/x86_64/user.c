@@ -100,7 +100,7 @@ void arch_as_free(void *as)
 		if (!(p[i] & PTE_P))
 			continue;
 		uint64_t *n = (uint64_t *)ADDR(p[i]);
-		free_level(n, 2);
+		free_level(n, 3);	/* PDPT, PD, PT, then the pages themselves */
 		pmm_free(n, 1);
 	}
 	pmm_free(p, 1);

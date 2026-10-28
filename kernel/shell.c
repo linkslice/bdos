@@ -218,6 +218,12 @@ static int stdout_is_captured(void)
 	return c && c->write == wc_write && ((struct wrapcon *)c)->capture;
 }
 
+/* > a file, or | a pipe: what's written goes there, not to the screen */
+int stdout_is_redirected(void)
+{
+	return stdout_is_captured();
+}
+
 /* ---- small helpers ------------------------------------------------------------ */
 
 int resolve_path(const char *in, char *out, size_t n)

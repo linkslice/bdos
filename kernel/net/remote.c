@@ -701,6 +701,15 @@ static void rd_screen(struct rdisp *rd)
 
 static void rd_send_rect(struct rdisp *rd, struct rect r);
 
+/* still sending earlier pictures: a game's next frame can wait */
+static int rd_busy(struct display *d)
+{
+	struct rdisp *rd = (struct rdisp *)d;
+	if (!conn_alive(rd->c))
+		return 0;
+	return rd->npend || rd->nout || conn_backlog(rd->c) > PIX_BACKLOG;
+}
+
 /* send what's changed, if the link has room for it */
 static void rd_send_pending(struct rdisp *rd)
 {
@@ -879,6 +888,7 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	}
 	rd->d.pointer = rd_pointer;
 	rd->d.commit = rd_commit;
+	rd->d.busy = rd_busy;
 	rd->d.name = "network";
 
 	struct task *t = task_current();

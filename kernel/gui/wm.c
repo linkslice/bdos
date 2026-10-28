@@ -201,6 +201,8 @@ struct win *topmost(struct wm *wm)
 
 static void dnd_end(struct wm *wm);
 
+static void capture_end(struct wm *wm);
+
 void win_destroy(struct wm *wm, struct win *w)
 {
 	struct win **pp = &wm->wins;
@@ -221,6 +223,8 @@ void win_destroy(struct wm *wm, struct win *w)
 		wm->progman = NULL;
 	if (wm->grab == w)
 		wm->grab = NULL;
+	if (wm->capture == w)
+		capture_end(wm);
 	if (wm->resizing == w)
 		wm->resizing = NULL;
 	if (wm->drag == w)
@@ -1941,10 +1945,13 @@ static void draw_frame(struct surface *s, struct win *w, int active)
 	bevel(s, x, y, w->w, w->h, 1);
 	uint32_t tb = P(active ? theme.active : theme.inactive);
 	fill(s, x + BORDER, y + BORDER, w->w - 2 * BORDER, TITLE_H - 2, tb);
-	int tw = (int)strlen(w->title) * FONT_W;
 	int maxw = w->w - 2 * BORDER - 34 - (w->resizable ? 18 : 0) - (w->minimizable ? 18 : 0);
-	char t[64];
-	strncpy0(t, w->title, sizeof t);
+	char t[96];
+	if (w->wm && w->wm->capture == w)	/* how to get the pointer back */
+		snprintf(t, sizeof t, "%s - Ctrl+Alt frees the mouse", w->title);
+	else
+		strncpy0(t, w->title, sizeof t);
+	int tw = (int)strlen(t) * FONT_W;
 	if (tw > maxw && maxw > 0) {
 		t[maxw / FONT_W] = 0;
 		tw = (int)strlen(t) * FONT_W;
@@ -2064,7 +2071,7 @@ static void compose(struct wm *wm, struct rect r)
 		outline(s, g.x + 1, g.y + 1, g.w - 2, g.h - 2, P(0xFFFFFF));
 		outline(s, g.x + 2, g.y + 2, g.w - 4, g.h - 4, P(0));
 	}
-	if (wm->disp->draws_pointer) {
+	if (wm->disp->draws_pointer && !wm->capture) {
 		if (wm->ptr)
 			draw_resize_pointer(s, wm->mx, wm->my, wm->ptr);
 		else
@@ -2231,6 +2238,8 @@ static struct rect ptr_rect(struct wm *wm)
 
 static void update_pointer_shape(struct wm *wm, struct win *w)
 {
+	if (wm->capture)
+		return;		/* hidden */
 	int shape = wm->resizing ? wm->rs_edges : (wm->drag || wm->grab || wm->dnd.active) ? 0 :
 	    edge_at(w, wm->mx, wm->my);
 	if (shape == wm->ptr)
@@ -2279,8 +2288,102 @@ static void finish_drop(struct wm *wm, int x, int y)
 	kfree(paths);
 }
 
+/*
+ * Capturing the pointer, for a game that turns with the mouse (Doom): it
+ * reads how far the mouse moved, not where the pointer is, and loses it at
+ * the edge of its window. A click in it captures the pointer -- hidden, held
+ * where it is, and every bit of motion goes to the game -- until Ctrl+Alt,
+ * or the window goes, or the game stops wanting it.
+ */
+static struct display *win_child_disp(struct win *w)
+{
+	return w && w->kind == W_TERM && w->term && w->term->child ? w->term->child_disp : NULL;
+}
+
+static void capture_start(struct wm *wm, struct win *w, int nested)
+{
+	wm->capture = w;
+	wm->cap_x = wm->mx;
+	wm->cap_y = wm->my;
+	wm->cap_nested = nested;
+	wm->grab = NULL;
+	wm_dirty(wm, ptr_rect(wm));
+	win_dirty_all(w);	/* the title says how to get out */
+	if (!wm->disp->draws_pointer && wm->disp->pointer)
+		wm->disp->pointer(wm->disp, PTR_CAPTURED);	/* bterm: relative motion */
+}
+
+static void capture_end(struct wm *wm)
+{
+	struct win *w = wm->capture;
+	if (!w)
+		return;
+	wm->capture = NULL;
+	if (!w->closed) {
+		win_dirty_all(w);
+		/* let go of any buttons the game still thinks are down */
+		if (wm->buttons && win_child_disp(w)) {
+			struct event up = { EV_UP, 0, 0, EVB_REL, 0 };
+			send_to_window(w, &up);
+		}
+		if (w->term)
+			w->term->want_capture = 0;
+	}
+	wm_dirty(wm, ptr_rect(wm));
+	if (!wm->disp->draws_pointer && wm->disp->pointer)
+		wm->disp->pointer(wm->disp, wm->ptr);
+}
+
+/* still wanted? The game may have quit, or gone back to text */
+static void capture_check(struct wm *wm)
+{
+	struct win *w = wm->capture;
+	if (!w)
+		return;
+	struct display *cd = win_child_disp(w);
+	int keep = cd && w == wm->focus && !w->minimized &&
+	    (wm->cap_nested ? w->term->want_capture : cd->wants_capture);
+	if (!keep)
+		capture_end(wm);
+}
+
+static void capture_mouse(struct wm *wm, struct event *e)
+{
+	int dx, dy;
+	if (e->buttons & EVB_REL) {		/* from the desktop around us, captured too */
+		dx = e->x;
+		dy = e->y;
+	} else if (e->buttons & EVB_DELTA) {	/* the mouse's own motion */
+		dx = ev_dx(e);
+		dy = ev_dy(e);
+	} else {				/* a tablet or a host pointer: as far as it went */
+		dx = e->x - wm->cap_x;
+		dy = e->y - wm->cap_y;
+		wm->cap_x = e->x;
+		wm->cap_y = e->y;
+	}
+	int buttons = e->buttons & 7;
+	wm->mods = e->buttons & (MOD_SHIFT | MOD_CTRL | MOD_ALT);
+	int pressed = buttons & ~wm->buttons, released = wm->buttons & ~buttons;
+	wm->buttons = buttons;
+	if (!dx && !dy && !pressed && !released)
+		return;
+	struct event le = { pressed ? EV_DOWN : released ? EV_UP : EV_MOVE, dx, dy,
+	    buttons | wm->mods | EVB_REL, 0 };
+	send_to_window(wm->capture, &le);
+}
+
 static void handle_mouse(struct wm *wm, struct event *e)
 {
+	if (wm->capture) {
+		capture_check(wm);
+		if (wm->capture) {
+			capture_mouse(wm, e);
+			return;
+		}
+	}
+	if (e->buttons & EVB_REL)
+		return;		/* motion meant for a captured window that's gone */
 	int x = e->x, y = e->y;
 	if (wm->disp->draws_pointer && (x != wm->mx || y != wm->my)) {
 		wm_dirty(wm, ptr_rect(wm));
@@ -2441,6 +2544,13 @@ static void handle_mouse(struct wm *wm, struct event *e)
 				control_menu(wm, w, x, y);
 			return;
 		}
+		struct display *cd = win_child_disp(w);
+		if (button == 1 && cd && cd->wants_capture) {
+			/* the click that captures the pointer isn't a shot in the game */
+			wm->buttons = buttons;
+			capture_start(wm, w, 0);
+			return;
+		}
 		wm->grab = w;
 		if (raw_window(w)) {
 			struct event le = *e;
@@ -2525,6 +2635,8 @@ static void track_rawmods(struct wm *wm, int sc)
 		wm->rawmods &= ~bit;
 	else
 		wm->rawmods |= bit;
+	if (wm->capture && (wm->rawmods & 6) == 6)
+		capture_end(wm);	/* Ctrl+Alt: the pointer back */
 }
 
 /* the wheel: to the window under the pointer, as Windows 10 does */
@@ -2614,6 +2726,11 @@ static void wm_loop(struct wm *wm)
 				handle_mouse(wm, &e);
 		}
 		check_terms(wm);
+		/* a desktop inside a window captured the pointer: so do we, for it */
+		struct win *f = wm->focus;
+		if (!wm->capture && f && f->term && f->term->want_capture && win_child_disp(f))
+			capture_start(wm, f, 1);
+		capture_check(wm);
 		form_tick_all(wm);
 		if (wm->follow_time && uptime_ms() >= wm->next_time_check) {
 			/* the desktop follows the sun */
@@ -2749,6 +2866,7 @@ static int scr_event(struct display *d, struct event *e)
 			sd->mx = MAX(0, MIN(sd->mx + m.dx, sd->back.w - 1));
 			sd->my = MAX(0, MIN(sd->my + m.dy, sd->back.h - 1));
 		}
+		int delta = m.abs ? 0 : EVB_DELTA;	/* the motion itself, edges or not */
 		int type = EV_MOVE;
 		if ((m.buttons & 1) && !(sd->buttons & 1))
 			type = EV_DOWN;
@@ -2756,7 +2874,8 @@ static int scr_event(struct display *d, struct event *e)
 			type = EV_UP;
 		sd->buttons = m.buttons;
 		int mods = input_mods();
-		*e = (struct event){ type, sd->mx, sd->my, m.buttons | (mods << 8), 0 };
+		*e = (struct event){ type, sd->mx, sd->my, m.buttons | (mods << 8) | delta,
+		    delta ? ev_delta(m.dx, m.dy) : 0 };
 		return 1;
 	}
 	return 0;
@@ -2788,6 +2907,26 @@ static void td_unlock(struct display *d)
 	struct term_disp *td = (struct term_disp *)d;
 	if (td->t->wm)
 		desk_unlock(td->t->wm);
+}
+
+/* a window's pixels go wherever its desktop's go: busy when that is */
+static int td_busy(struct display *d)
+{
+	struct term_disp *td = (struct term_disp *)d;
+	struct wm *host = td->t->wm;
+	return host && host->disp ? display_busy(host->disp) : 0;
+}
+
+int display_busy(struct display *d)
+{
+	return d && d->busy ? d->busy(d) : 0;
+}
+
+/* a desktop in this window captured the pointer (or let it go) */
+static void td_pointer(struct display *d, int shape)
+{
+	struct term_disp *td = (struct term_disp *)d;
+	td->t->want_capture = (shape & PTR_CAPTURED) != 0;
 }
 
 static void td_attach(struct display *d, struct wm *wm)
@@ -2856,6 +2995,10 @@ struct display *display_open(struct console *c, int *err)
 		td->d.attach = td_attach;
 		td->d.lock = td_lock;
 		td->d.unlock = td_unlock;
+		td->d.busy = td_busy;
+		td->d.pointer = td_pointer;
+		t->child_disp = &td->d;
+		t->want_capture = 0;
 		memset(&t->child_ev, 0, sizeof t->child_ev);
 		return &td->d;
 	}
@@ -2918,6 +3061,8 @@ void display_close(struct display *d)
 		display_want_size(d, 0, 0);
 	if (tw_lock(t)) {
 		t->child = 0;
+		t->child_disp = NULL;
+		t->want_capture = 0;
 		if (t->win) {
 			tw_redraw(t);
 			win_dirty_all(t->win);
@@ -2925,6 +3070,7 @@ void display_close(struct display *d)
 		desk_unlock(t->wm);
 	} else {
 		t->child = 0;
+		t->child_disp = NULL;
 	}
 	kfree(td);
 }

@@ -69,6 +69,10 @@ static const uint8_t int8_code[] = {
 static const uint8_t int9_code[] = {
 	0x50,				/* push ax */
 	0xE4, 0x60,			/* in al,60h */
+	0xB4, 0x4F,			/* mov ah,4Fh: the keyboard intercept, */
+	0xF9,				/* stc         as a real BIOS offers it -- */
+	0xCD, 0x15,			/* int 15h     a hook may change the key, */
+	0x73, 0x02,			/* jnc +2      or swallow it */
 	0xF1, HLE_INT9,			/* the C keyboard handler */
 	0xB0, 0x20,			/* mov al,20h */
 	0xE6, 0x20,			/* out 20h,al */
@@ -102,6 +106,10 @@ void bios_init(struct dosbox *b)
 	rom(b, ROM_IDLE, idle, 4);
 	static const uint8_t vbe[] = { 0xF1, HLE_VBE_BANK, 0xCB };
 	rom(b, ROM_VBE_BANK, vbe, 3);
+	/* what this VGA can do, as INT 10h 1Bh points at: modes 0-13h, 200 350
+	 * and 400 lines, 8 fonts, palettes and the rest */
+	static const uint8_t funcs[16] = { 0xFF, 0xE0, 0x0F, 0, 0, 0, 0, 0x07, 0x02, 0x08, 0xE7, 0x0C, 0, 0, 0, 0 };
+	rom(b, ROM_VGA_FUNCS, funcs, sizeof funcs);
 	dpmi_rom(b);
 	/* INT 15h C0h's table: AT-class, extended BIOS area, RTC, keyboard intercept */
 	static const uint8_t conf[] = { 0x08, 0x00, 0xFC, 0x01, 0x00, 0x74, 0x40, 0x00, 0x00, 0x00 };
@@ -693,9 +701,36 @@ static void int10(struct dosbox *b)
 			set16(c, R_EBX, 0x0008);	/* VGA, colour */
 		}
 		break;
-	case 0x1B:
-		setlo(c, R_EAX, 0);
+	case 0x1B: {		/* the state of the display, 64 bytes at ES:DI */
+		if (BX(c) != 0)
+			break;
+		uint32_t a = c->s[S_ES].base + DI(c);
+		for (int i = 0; i < 64; i++)
+			x86_wr8(c, a + (uint32_t)i, 0);
+		x86_wr16(c, a, ROM_VGA_FUNCS);
+		x86_wr16(c, a + 2, BIOS_SEG);
+		int m = b->vga.mode;
+		x86_wr8(c, a + 4, (uint8_t)m);
+		x86_wr16(c, a + 5, mw(b, BDA + 0x4A));		/* columns */
+		x86_wr16(c, a + 7, mw(b, BDA + 0x4C));		/* page size */
+		x86_wr16(c, a + 9, mw(b, BDA + 0x4E));		/* page start */
+		for (int p = 0; p < 8; p++)
+			x86_wr16(c, a + 11 + (uint32_t)p * 2, mw(b, BDA + 0x50 + (uint32_t)p * 2));
+		x86_wr16(c, a + 0x1B, mw(b, BDA + 0x60));	/* cursor shape */
+		x86_wr8(c, a + 0x1D, (uint8_t)cur_page(b));
+		x86_wr16(c, a + 0x1E, mw(b, BDA + 0x63) ? mw(b, BDA + 0x63) : 0x3D4);
+		x86_wr8(c, a + 0x22, (uint8_t)(mb(b, BDA + 0x84) + 1));	/* rows */
+		x86_wr16(c, a + 0x23, mw(b, BDA + 0x85));	/* character height */
+		x86_wr8(c, a + 0x25, 0x08);			/* VGA, colour */
+		x86_wr16(c, a + 0x27, (uint16_t)(m == 0x13 ? 256 : m == 7 || m == 0x0F ? 0 : m == 4 || m == 5 ? 4 :
+		    m == 6 || m == 0x11 ? 2 : 16));			/* colours */
+		x86_wr8(c, a + 0x29, (uint8_t)(m <= 3 ? 8 : m == 0x0D ? 8 : m == 0x0E ? 4 : m == 0x10 ? 2 : 1));
+		x86_wr8(c, a + 0x2A, (uint8_t)(m == 0x0F || m == 0x10 ? 1 : m == 0x11 || m == 0x12 ? 3 :
+		    m <= 3 || m == 7 ? 2 : 0));			/* 200, 350, 400 or 480 lines */
+		x86_wr8(c, a + 0x31, 3);			/* 256 KB */
+		setlo(c, R_EAX, 0x1B);
 		break;
+	}
 	case 0x4F:
 		vga_vbe(b);
 		break;
@@ -722,7 +757,7 @@ static const char kb_hi[0x3A] = {
 	'*', 0, ' ',
 };
 
-static void kbuf_put(struct dosbox *b, uint16_t key)
+static int kbuf_put(struct dosbox *b, uint16_t key)
 {
 	uint16_t head = mw(b, BDA + 0x1A), tail = mw(b, BDA + 0x1C);
 	uint16_t start = mw(b, BDA + 0x80), end = mw(b, BDA + 0x82);
@@ -730,9 +765,10 @@ static void kbuf_put(struct dosbox *b, uint16_t key)
 	if (next >= end)
 		next = start;
 	if (next == head)
-		return;		/* full: a real BIOS beeps */
+		return 0;	/* full: a real BIOS beeps */
 	mww(b, BDA + tail, key);
 	mww(b, BDA + 0x1C, next);
+	return 1;
 }
 
 int bios_key_avail(struct dosbox *b)
@@ -934,9 +970,8 @@ static int int16(struct dosbox *b)
 		return 0;
 	case 0x03:
 		return 0;
-	case 0x05:
-		kbuf_put(b, CX(c));
-		setlo(c, R_EAX, 0);
+	case 0x05:		/* AL 1: the buffer was full */
+		setlo(c, R_EAX, (uint8_t)!kbuf_put(b, CX(c)));
 		return 0;
 	case 0x0A:
 		set16(c, R_EBX, 0x41AB);
@@ -1144,6 +1179,8 @@ static void mouse_axes(struct dosbox *b, struct axis *ax, struct axis *ay)
 	*ay = mouse_axis(m->miny, m->maxy, h, vh);
 }
 
+static void mouse_moved(struct dosbox *b, int ox, int oy, int buttons);
+
 /* from the display: where the pointer is, in pixels of the program's screen */
 void mouse_event(struct dosbox *b, int sx, int sy, int buttons)
 {
@@ -1170,6 +1207,52 @@ void mouse_event(struct dosbox *b, int sx, int sy, int buttons)
 	 * counted on the screen whatever the range */
 	m->mickx += (m->x - ox) * ax.den * vw / MAX(ax.num * w, 1);
 	m->micky += (m->y - oy) * 2 * ay.den * vh / MAX(ay.num * h, 1);
+	mouse_moved(b, ox, oy, buttons);
+}
+
+/*
+ * The pointer is captured (a game that turns with the mouse): this is how
+ * far the mouse moved, in the host's pixels. As a real driver does, motion
+ * is mickeys -- one per pixel across and two down, like a mouse of the time
+ * on a 640-wide screen, scaled by the program's sensitivity -- and the
+ * place follows them, clipped to the range.
+ */
+void mouse_motion(struct dosbox *b, int dx, int dy, int buttons)
+{
+	struct mouse *m = &b->mouse;
+	if (!m->on)
+		return;
+	if (m->fx / 8 != m->x)		/* the program put it somewhere (04h, a reset) */
+		m->fx = m->x * 8;
+	if (m->fy / 8 != m->y)
+		m->fy = m->y * 8;
+	/* the program's sensitivity (1Ah): 50 leaves it as it is */
+	int mx = dx * MAX(m->sens_x, 1) / 50, my = dy * 2 * MAX(m->sens_y, 1) / 50;
+	m->mickx += mx;
+	m->micky += my;
+	/* the place moves 8 coordinates per ratio_x mickeys across, 8 per ratio_y
+	 * down (0Fh: 8 and 16 unless the program says), kept in eighths so slow
+	 * motion still adds up */
+	m->fx = MAX(m->minx * 8, MIN(m->maxx * 8, m->fx + mx * 64 / MAX(m->ratio_x, 1)));
+	m->fy = MAX(m->miny * 8, MIN(m->maxy * 8, m->fy + my * 64 / MAX(m->ratio_y, 1)));
+	int ox = m->x, oy = m->y;
+	m->x = m->fx / 8;
+	m->y = m->fy / 8;
+	mouse_moved(b, ox, oy, buttons);
+}
+
+/* a program that reads the mouse's motion with the pointer hidden, in
+ * graphics: a 3D game, which a click should capture the pointer for */
+int mouse_wants_capture(struct dosbox *b)
+{
+	struct mouse *m = &b->mouse;
+	return m->on && m->shown <= 0 && !vga_is_text(b) && m->motion_read &&
+	    uptime_ms() - m->motion_read < 3000;
+}
+
+static void mouse_moved(struct dosbox *b, int ox, int oy, int buttons)
+{
+	struct mouse *m = &b->mouse;
 	int ev = 0;
 	if (m->x != ox || m->y != oy)
 		ev |= 1;
@@ -1297,6 +1380,30 @@ void mouse_draw(struct dosbox *b, struct surface *s, struct rect area)
 			}
 		return;
 	}
+	if (m->cur_set) {
+		/*
+		 * The program's cursor (09h), as the driver draws one: each pixel of
+		 * the screen ANDed with the screen mask, then XORed with the cursor
+		 * mask -- clear, black, white, or inverted -- around its hot spot
+		 */
+		int ox = px - m->hot_x * scale, oy = py - m->hot_y * scale;
+		for (int y = 0; y < 16; y++)
+			for (int x = 0; x < 16; x++) {
+				int keep = (m->cur_and[y] >> (15 - x)) & 1, flip = (m->cur_xor[y] >> (15 - x)) & 1;
+				if (keep && !flip)
+					continue;
+				for (int sy = 0; sy < scale; sy++)
+					for (int sx = 0; sx < scale; sx++) {
+						int X = ox + x * scale + sx, Y = oy + y * scale + sy;
+						if (X < 0 || Y < 0 || X >= s->w || Y >= s->h)
+							continue;
+						uint32_t *p = &s->px[(size_t)Y * (size_t)s->pitch + X];
+						uint32_t v = keep ? *p : col(0);
+						*p = flip ? v ^ (col(0xFFFFFF) ^ col(0)) : v;
+					}
+			}
+		return;
+	}
 	static const uint16_t arrow[16] = {
 		0x8000, 0xC000, 0xE000, 0xF000, 0xF800, 0xFC00, 0xFE00, 0xFF00,
 		0xFF80, 0xFC00, 0xEC00, 0xC600, 0x8600, 0x0300, 0x0300, 0x0000,
@@ -1317,6 +1424,21 @@ void mouse_draw(struct dosbox *b, struct surface *s, struct rect area)
 		}
 }
 
+/* functions 0 and 21h: everything back as the driver starts */
+static void mouse_reset(struct dosbox *b)
+{
+	struct mouse *m = &b->mouse;
+	memset(m, 0, sizeof *m);
+	m->on = 1;
+	m->shown = 0;
+	mouse_limits(b);
+	m->x = (m->maxx + 1) / 2;
+	m->y = (m->maxy + 1) / 2;
+	m->ratio_x = 8;
+	m->ratio_y = 16;
+	m->sens_x = m->sens_y = m->sens_dbl = 50;
+}
+
 static void int33(struct dosbox *b)
 {
 	struct x86 *c = &b->cpu;
@@ -1331,14 +1453,53 @@ static void int33(struct dosbox *b)
 			set16(c, R_EAX, 0);	/* COM1 or a remote shell: no mouse here */
 			break;
 		}
-		memset(m, 0, sizeof *m);
-		m->on = 1;
-		m->shown = 0;
-		mouse_limits(b);
-		m->x = (m->maxx + 1) / 2;
-		m->y = (m->maxy + 1) / 2;
+		mouse_reset(b);
 		set16(c, R_EAX, 0xFFFF);
 		set16(c, R_EBX, 2);
+		break;
+	case 0x09: {		/* the graphics cursor: hot spot, then AND and XOR masks at ES:DX */
+		uint32_t a = c->s[S_ES].base + DX(c);
+		for (int i = 0; i < 16; i++) {
+			m->cur_and[i] = (uint16_t)(x86_rd8(c, a + (uint32_t)i * 2) | x86_rd8(c, a + (uint32_t)i * 2 + 1) << 8);
+			m->cur_xor[i] = (uint16_t)(x86_rd8(c, a + 32 + (uint32_t)i * 2) | x86_rd8(c, a + 33 + (uint32_t)i * 2) << 8);
+		}
+		m->hot_x = (int16_t)BX(c);
+		m->hot_y = (int16_t)CX(c);
+		m->cur_set = 1;
+		b->vga.dirty = 1;
+		break;
+	}
+	case 0x0F:		/* mickeys per 8 pixels */
+		if (CX(c))
+			m->ratio_x = CX(c);
+		if (DX(c))
+			m->ratio_y = DX(c);
+		break;
+	case 0x10: {		/* conditional off: hidden while it's in this box */
+		int x0 = (int16_t)CX(c), y0 = (int16_t)DX(c), x1 = (int16_t)SI(c), y1 = (int16_t)DI(c);
+		if (m->x >= MIN(x0, x1) && m->x <= MAX(x0, x1) && m->y >= MIN(y0, y1) && m->y <= MAX(y0, y1) &&
+		    m->shown > 0) {
+			m->shown = 0;
+			b->vga.dirty = 1;
+		}
+		break;
+	}
+	case 0x1A:
+		m->sens_x = BX(c);
+		m->sens_y = CX(c);
+		m->sens_dbl = DX(c);
+		break;
+	case 0x1F:		/* disable the driver: allowed, and nothing to undo */
+		set16(c, R_EAX, 0x001F);
+		break;
+	case 0x20:
+		set16(c, R_EAX, 0xFFFF);
+		break;
+	case 0x31:		/* the range */
+		set16(c, R_EAX, (uint16_t)m->minx);
+		set16(c, R_EBX, (uint16_t)m->miny);
+		set16(c, R_ECX, (uint16_t)m->maxx);
+		set16(c, R_EDX, (uint16_t)m->maxy);
 		break;
 	case 0x01: m->shown++; if (m->shown > 1) m->shown = 1; b->vga.dirty = 1; break;
 	case 0x02: m->shown--; b->vga.dirty = 1; break;
@@ -1381,12 +1542,13 @@ static void int33(struct dosbox *b)
 		m->maxy = MAX((int16_t)CX(c), (int16_t)DX(c));
 		m->y = MAX(m->miny, MIN(m->maxy, m->y));
 		break;
-	case 0x09: case 0x0A: case 0x0F: case 0x13: case 0x1A: case 0x1D:
+	case 0x0A: case 0x13: case 0x1D:
 		break;
 	case 0x0B:
 		set16(c, R_ECX, (uint16_t)m->mickx);
 		set16(c, R_EDX, (uint16_t)m->micky);
 		m->mickx = m->micky = 0;
+		m->motion_read = uptime_ms();
 		break;
 	case 0x0C:
 		m->handler_mask = CX(c);
@@ -1409,9 +1571,9 @@ static void int33(struct dosbox *b)
 	case 0x16: case 0x17:
 		break;
 	case 0x1B:
-		set16(c, R_EBX, 50);
-		set16(c, R_ECX, 50);
-		set16(c, R_EDX, 50);
+		set16(c, R_EBX, (uint16_t)m->sens_x);
+		set16(c, R_ECX, (uint16_t)m->sens_y);
+		set16(c, R_EDX, (uint16_t)m->sens_dbl);
 		break;
 	case 0x24:
 		set16(c, R_EBX, 0x0626);	/* driver 6.26 */

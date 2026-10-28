@@ -182,6 +182,7 @@ int dosbox_load_state(struct dosbox *b, const char *file)
 	b->task = task;
 	b->con = con;
 	b->disp = disp;
+	b->shadow_of = NULL;
 	b->disp_failed = disp_failed;
 	b->raw_seen = raw_seen;
 	b->sb.stream = sb_stream;

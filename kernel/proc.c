@@ -233,7 +233,10 @@ static void thread_start(void *arg)
 	struct thread *th = arg;
 	struct task *t = task_current();
 	struct proc *p = th->proc;
-	th->task = t;
+	/* our task stays (isn't reaped, so its address isn't reused) until
+	 * we're joined or the program ends: see thread_unpin */
+	__atomic_fetch_add(&t->waiters, 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&th->task, t, __ATOMIC_RELEASE);
 	t->proc = p;
 	bkl_release_all();		/* user code never holds the lock */
 	arch_as_switch(p->as);
@@ -278,9 +281,22 @@ static struct thread *thread_self(struct proc *p)
 {
 	struct task *t = task_current();
 	for (int i = 0; i < MAX_THREADS; i++)
-		if (p->th[i].used && p->th[i].task == t)
+		if (p->th[i].used && !p->th[i].done && p->th[i].task == t)
 			return &p->th[i];
 	return NULL;
+}
+
+/* a thread that has finished: wait till its task is off every core, then
+ * let the scheduler free it */
+static void thread_unpin(struct thread *th)
+{
+	struct task *t = __atomic_load_n(&th->task, __ATOMIC_ACQUIRE);
+	if (!t)
+		return;
+	while (t->state != TASK_DEAD || t->cpu >= 0)
+		task_idle();
+	th->task = NULL;
+	__atomic_fetch_sub(&t->waiters, 1, __ATOMIC_RELAXED);
 }
 
 _Noreturn static void thread_exit(struct proc *p, int code)
@@ -622,8 +638,11 @@ void syscall_dispatch(struct sysframe *f)
 		}
 		while (!__atomic_load_n(&th->done, __ATOMIC_ACQUIRE) && !p->exiting)
 			task_idle();
-		while (th->task && task_alive(th->task) && !p->exiting)
-			task_idle();
+		if (!__atomic_load_n(&th->done, __ATOMIC_ACQUIRE)) {
+			r = E_INVAL;	/* the program is ending: its end tidies up */
+			break;
+		}
+		thread_unpin(th);
 		r = th->code;
 		th->used = 0;
 		break;
@@ -1024,8 +1043,8 @@ int proc_run(const char *path, int argc, char **argv)
 	}
 	/* every thread is off every core: the address space can go */
 	for (int i = 0; i < MAX_THREADS; i++)
-		while (p->th[i].used && p->th[i].task && task_alive(p->th[i].task))
-			task_idle();
+		if (p->th[i].used)
+			thread_unpin(&p->th[i]);
 	for (int i = 0; i < 4; i++)
 		if (p->audio[i])
 			audio_close(p->audio[i] - 1);

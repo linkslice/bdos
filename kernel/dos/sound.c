@@ -840,6 +840,84 @@ static void render_opl(struct dosbox *b, uint64_t now)
  * The box's loop calls this every time round
  * ====================================================================================== */
 
+/*
+ * The PC speaker, drawn: the cone is out while port 61h's data bit is set
+ * and (with the gate on) the PIT's channel 2 is high -- a square wave at its
+ * pitch, or whatever the program makes by flicking the data bit itself (the
+ * way some games talk). The changes come with their times (hw.c), so even
+ * the flicking comes out right. A DC blocker keeps a cone held out silent.
+ */
+#define SPK_AMP	7000
+
+static void render_speaker(struct dosbox *b)
+{
+	struct spk *s = &b->spk;
+	uint64_t now = dos_now(b);
+	if (!s->last_us || now < s->last_us || now - s->last_us > 200000) {
+		s->last_us = now;	/* the start, or held up: from now */
+		s->nev = 0;
+		s->bits = b->port61 & 3;
+		s->hz = b->pit[2].reload > 16 ? (uint32_t)(PIT_HZ / b->pit[2].reload) : 0;
+		return;
+	}
+	if (!s->nev && !(s->bits & 2) && s->y1 > -64 && s->y1 < 64) {
+		s->last_us = now;	/* silent, and nothing's changed: nothing to draw */
+		s->y1 = s->x1 = 0;
+		return;
+	}
+	uint32_t n = (uint32_t)((now - s->last_us) * AUDIO_RATE / 1000000);
+	if (!n)
+		return;
+	if (!s->stream) {
+		int id = audio_open_named(AUDIO_RATE, "PC speaker");
+		if (id < 0) {
+			s->nev = 0;
+			s->last_us = now;
+			return;
+		}
+		s->stream = id + 1;
+	}
+	int16_t buf[512];
+	uint32_t k = 0, e = 0;
+	uint64_t t0 = s->last_us;
+	uint32_t step = s->hz ? (uint32_t)(((uint64_t)s->hz << 32) / AUDIO_RATE) : 0;
+	for (uint32_t i = 0; i < n; i++) {
+		uint64_t t = t0 + (uint64_t)i * 1000000 / AUDIO_RATE;
+		while (e < (uint32_t)s->nev && s->ev[e].t <= t) {
+			s->bits = s->ev[e].bits;
+			if (s->ev[e].hz != s->hz) {
+				s->hz = s->ev[e].hz;
+				step = s->hz ? (uint32_t)(((uint64_t)s->hz << 32) / AUDIO_RATE) : 0;
+			}
+			e++;
+		}
+		int out;
+		if (!(s->bits & 2))
+			out = 0;
+		else if ((s->bits & 1) && s->hz >= 20 && s->hz <= 20000) {
+			s->phase += step;
+			out = (s->phase & 0x80000000u) ? SPK_AMP : 0;
+		} else {
+			out = SPK_AMP;
+		}
+		int32_t y = out - s->x1 + ((s->y1 * 32604) >> 15);
+		s->x1 = out;
+		s->y1 = y;
+		buf[k++] = (int16_t)MAX(-32768, MIN(32767, y));
+		if (k == NELEM(buf)) {
+			audio_write(s->stream - 1, buf, k, 1);
+			k = 0;
+		}
+	}
+	if (k)
+		audio_write(s->stream - 1, buf, k, 1);
+	/* changes still to come stay for next time */
+	if (e)
+		memmove(s->ev, s->ev + e, sizeof s->ev[0] * (size_t)(s->nev - (int)e));
+	s->nev -= (int)e;
+	s->last_us = t0 + (uint64_t)n * 1000000 / AUDIO_RATE;
+}
+
 void sb_poll(struct dosbox *b, uint64_t now)
 {
 	if (b->sb.dma_on || b->sb.silence_left)
@@ -847,6 +925,8 @@ void sb_poll(struct dosbox *b, uint64_t now)
 	else
 		render_direct(b, now);
 	render_opl(b, now);
+	if (b->spk.mixer)
+		render_speaker(b);
 }
 
 void sb_free(struct dosbox *b)
@@ -855,5 +935,7 @@ void sb_free(struct dosbox *b)
 		audio_close(b->sb.stream - 1);
 	if (b->opl.stream)
 		audio_close(b->opl.stream - 1);
-	b->sb.stream = b->opl.stream = 0;
+	if (b->spk.stream)
+		audio_close(b->spk.stream - 1);
+	b->sb.stream = b->opl.stream = b->spk.stream = 0;
 }

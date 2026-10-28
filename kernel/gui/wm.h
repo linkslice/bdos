@@ -82,5 +82,6 @@ int desktop_run_on(struct display *d, const char *title);
 void display_lock(struct display *d);
 void display_unlock(struct display *d);
 int display_busy(struct display *d);
+int display_remote(struct display *d);
 
 #endif

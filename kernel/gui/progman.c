@@ -596,7 +596,7 @@ static void reload_everywhere(void)
 static const char *const icon_names[] = {
 	"prompt", "edit", "basic", "cfile", "folder", "file", "gear", "game", "book", "chip",
 	"computer", "network", "group", "control", "clock", "calendar", "mouse", "keyboard",
-	"palette", "desktop", "trash",
+	"palette", "desktop", "trash", "speaker",
 };
 
 struct props {

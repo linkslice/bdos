@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.11 (x86-64) - Bryan Disk Operating System
+bdos 0.12 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -212,7 +212,21 @@ the cores, and system calls for files, the console, TCP/IP and sound.
 - `.C` files still run in the interpreter, as before.
 
 **Sound.** An HD Audio driver and a mixer: `PLAY file.wav`, native programs'
-streams, the DOS boxes' Sound Blasters and OPL2s all play at once.
+streams, the DOS boxes' Sound Blasters, OPL2s and PC speakers all play at once.
+- Each session has its own sound, the way it has its own T:. The machine's
+  own console plays through its sound card; a bterm session's sound plays on
+  the bterm's machine, whether or not this one has a sound card; a session
+  whose far end can't play sound (telnet, `bterm -q`) is silent. Nobody hears
+  anyone else's.
+- Whatever a session starts sounds in it, nested desktops included, and
+  `CPU \\HOST prog` brings that machine's sound back to wherever you are.
+- Over the network it's IMA ADPCM, 10 ms to a packet (about 390 kbit/s while
+  something plays, nothing when it doesn't), sent outside the reliable
+  stream: a lost packet is just filled in, never waited for.
+- `SOUND` shows where your session's sound goes and what's playing; `SOUND
+  VOLUME 50`, `SOUND MUTE`. The Sound applet does the same, and `VOLUME$`
+  and `AUDIO$` (raw 48 kHz stereo) are there for batch files.
+  `CONTROL sound.remote=0` keeps every remote session silent.
 
 **Networking (BDNET).** A small LAN protocol carried directly on Ethernet,
 in the spirit of NetBEUI, with an e1000 driver.

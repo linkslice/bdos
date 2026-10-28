@@ -85,6 +85,18 @@ try:
     if suite("sound"):
         check("a DOS program on the Sound Blaster and OPL2", dos_sound)
 
+    def speaker():
+        # the PC speaker goes through the mixer now: 1000 Hz from TONE.COM
+        # comes out of the sound card
+        before = len(windows_of(WAV))
+        vm.cmd("\\dosapps\\tone", "TONE done", timeout=30)
+        time.sleep(1.5)                         # what's still in the card's buffer
+        w = windows_of(WAV)[before:]
+        loud = [hz for rms, hz in w if rms > 1000 and 900 < hz < 1100]
+        assert len(loud) >= 4, f"recording after TONE: {[(int(r), h) for r, h in w]}"
+    if suite("sound"):
+        check("the PC speaker, through the sound card", speaker)
+
     def usb():
         out = vm.cmd("usb", ["keyboard", "tablet"])
         vm.keys(*"echo", "spc", *"typed", "spc", *"on", "spc", *"usb", "ret")

@@ -562,6 +562,11 @@ static const struct icon icons[] = {
 		".....kwwkwk.....", "....kwwwkwwk....", "....kwwwkwwk....", "....kkkkkkkk....",
 		"....kwwwwwwk....", "....kwwwwwwk....", "....kwwwwwwk....", "....kwwwwwwk....",
 		"....kwwwwwwk....", ".....kwwwwk.....", "......kkkk......", "................" } },
+	{ "speaker", {
+		"................", "......k.........", ".....kk...k.....", "....kgk....k....",
+		"...kggk..k..k...", "kkkkggk...k.k...", "kwwkggk....k.k..", "kwwkggk....k.k..",
+		"kwwkggk....k.k..", "kkkkggk...k.k...", "...kggk..k..k...", "....kgk....k....",
+		".....kk...k.....", "......k.........", "................", "................" } },
 	{ "keyboard", {
 		"................", "................", "................", "kkkkkkkkkkkkkkkk",
 		"kggggggggggggggk", "kgwkwkwkwkwkwkgk", "kggggggggggggggk", "kgwkwkwkwkwkwkgk",

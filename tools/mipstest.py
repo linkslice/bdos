@@ -5,11 +5,12 @@ serial port, and runs the portable parts: the shell, BASIC, C, DOS programs.
 
 Usage: mipstest.py <KERNEL.SYS> <ROOTFS.IMG> <outdir>
 """
-import os, re, socket, subprocess, sys, tempfile, time
+import os, re, socket, subprocess, sys, tempfile, time, atexit, shutil
 
 KERNEL, ROOTFS, OUT = sys.argv[1:4]
 os.makedirs(OUT, exist_ok=True)
 tmp = tempfile.mkdtemp()
+atexit.register(shutil.rmtree, tmp, True)
 sock = os.path.join(tmp, "ser")
 proc = subprocess.Popen(["qemu-system-mips64el", "-M", "fuloong2e", "-m", "256", "-kernel", KERNEL,
                          "-initrd", ROOTFS, "-display", "none", "-serial", f"unix:{sock},server=on,wait=off"])

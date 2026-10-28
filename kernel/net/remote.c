@@ -14,12 +14,16 @@
 #include "../gui/wm.h"
 #include "net.h"
 #include "../lz.h"
+#include "../audio.h"
+#include "../settings.h"
+#include "../adpcm.h"
 
 enum {
 	M_KEY = 1, M_OUT, M_CTRL, M_EV, M_PIX, M_FREQ, M_FREP, M_BYE, M_PTR,
 	M_PIXZ,		/* M_PIX's payload squashed (lz.c): u32 its length, then the block */
 	M_DRAW,		/* drawing operations (gfx.h's GOP_...), for a viewer that draws */
 	M_DRAWZ,	/* the same, squashed: u32 their length, then the block */
+	M_AUDIO,	/* (a datagram) 10 ms of the session's sound: see net_audio_sink */
 };
 
 enum { C_CLEAR = 1, C_GOTO, C_ATTR, C_CURSOR };
@@ -32,6 +36,7 @@ enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAM
 #define HELLO_POINTER	2
 #define HELLO_LZ	4	/* the viewer understands M_PIXZ */
 #define HELLO_DRAW	8	/* the viewer draws for itself: send operations, not pixels */
+#define HELLO_AUDIO	16	/* the far end plays sound: send the session's (M_AUDIO) */
 
 struct hello {
 	int32_t w, h;		/* columns/rows (TTY) or pixels (DESK) */
@@ -47,6 +52,119 @@ static size_t strnlen_b(const char *s, size_t max)
 	while (n < max && s[n])
 		n++;
 	return n;
+}
+
+/* ---- sound: a session's, to the far end, and the far end's, played here ------------ */
+
+/*
+ * M_AUDIO, a datagram: u32 sequence, u16 frames, u8 codec (1: IMA ADPCM
+ * stereo, 48 kHz), u8 flags (1: the first after a quiet spell), then the
+ * block (adpcm.h). Lost ones are just gone; the player fills the gap.
+ */
+#define AUDIO_HDR	8
+
+struct netaudio {
+	struct conn *c;
+	uint32_t seq;
+	struct adpcm_ch st[2];
+	uint64_t last_sent;
+};
+
+static void net_audio_sink(void *ctx, const int16_t *pcm, uint32_t frames)
+{
+	struct netaudio *na = ctx;
+	uint8_t pkt[AUDIO_HDR + ADPCM_HDR + 512];
+	if (frames > 512 || !conn_alive(na->c))
+		return;
+	uint64_t now = uptime_ms();
+	uint8_t flags = now - na->last_sent > 50 ? 1 : 0;
+	na->last_sent = now;
+	memcpy(pkt, &na->seq, 4);
+	na->seq++;
+	uint16_t fr = (uint16_t)frames;
+	memcpy(pkt + 4, &fr, 2);
+	pkt[6] = 1;
+	pkt[7] = flags;
+	size_t n = adpcm_encode(na->st, pcm, frames, pkt + AUDIO_HDR);
+	bkl_enter();
+	conn_send_dgram(na->c, M_AUDIO, pkt, AUDIO_HDR + n, NULL, 0);
+	bkl_leave();
+}
+
+/* a remote session's sound: to the far end if it plays sound, else heard
+ * nowhere (but kept in time). Returns the session, or -1 */
+static int session_audio_start(struct conn *c, int flags, const char *who, struct netaudio **out)
+{
+	struct netaudio *na = NULL;
+	if ((flags & HELLO_AUDIO) && setting_int("sound.remote") != 0) {
+		na = kzalloc(sizeof *na);
+		if (na)
+			na->c = c;
+	}
+	int id = audio_session_new(who, na ? net_audio_sink : NULL, na);
+	if (id < 0) {
+		kfree(na);
+		na = NULL;
+	} else {
+		task_current()->asess = id;
+	}
+	*out = na;
+	return id;
+}
+
+static void session_audio_end(int id, struct netaudio *na)
+{
+	if (id >= 0)
+		audio_session_end(id);
+	task_current()->asess = 0;
+	kfree(na);
+}
+
+/* the far end's sound, played here in this task's session */
+struct audioin {
+	int stream;		/* +1 */
+	uint32_t next_seq;
+	int16_t pcm[512 * 2];
+};
+
+static void audio_in(struct audioin *ai, const struct netmsg *m, const char *who)
+{
+	if (m->len < AUDIO_HDR + ADPCM_HDR || m->data[6] != 1)
+		return;
+	if (!ai->stream) {
+		char name[24];
+		snprintf(name, sizeof name, "\\\\%s", who);
+		int id = audio_open_named(AUDIO_RATE, name);
+		if (id < 0)
+			return;
+		ai->stream = id + 1;
+	}
+	uint32_t seq;
+	memcpy(&seq, m->data, 4);
+	if ((int32_t)(seq - ai->next_seq) < 0 && !(m->data[7] & 1))
+		return;		/* late: its moment has passed */
+	ai->next_seq = seq + 1;
+	/* more than a fifth of a second waiting already: this one's too late
+	 * to be worth hearing (the clocks drift; it keeps the delay down) */
+	if (audio_queued(ai->stream - 1) > AUDIO_RATE / 5)
+		return;
+	uint32_t n = adpcm_decode(m->data + AUDIO_HDR, m->len - AUDIO_HDR, ai->pcm, 512);
+	audio_write(ai->stream - 1, ai->pcm, n, 2);
+}
+
+static void audio_in_end(struct audioin *ai)
+{
+	if (ai->stream)
+		audio_close(ai->stream - 1);
+	ai->stream = 0;
+}
+
+/* whether to ask the far end for sound: if anyone would hear it here */
+static int want_audio(void)
+{
+	int audible = 0;
+	audio_session_info(NULL, 0, NULL, NULL, &audible);
+	return audible ? HELLO_AUDIO : 0;
 }
 
 int net_unuse(char letter);
@@ -570,6 +688,10 @@ static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		if (tdr)
 			t->tdrive = &tdr->drive;
 	}
+	char who[40];
+	snprintf(who, sizeof who, "\\\\%s", h.host[0] ? h.host : conn_peer(c));
+	struct netaudio *na;
+	int asess = session_audio_start(c, h.flags, who, &na);
 	if (h.flags & HELLO_CMD) {
 		/* a CPU server's job: run it from the caller's own directory, T: */
 		h.cmd[sizeof h.cmd - 1] = 0;
@@ -582,6 +704,7 @@ static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		    h.share[0] ? h.share : "nothing", h.host);
 		shell_task(NULL);
 	}
+	session_audio_end(asess, na);
 	conn_send(c, M_BYE, NULL, 0);
 	t->con = NULL;
 	t->tdrive = NULL;
@@ -900,9 +1023,14 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		if (tdr)
 			t->tdrive = &tdr->drive;
 	}
+	char who[40];
+	snprintf(who, sizeof who, "\\\\%s", h.host[0] ? h.host : conn_peer(c));
+	struct netaudio *na;
+	int asess = session_audio_start(c, h.flags, who, &na);
 	char title[64];
 	snprintf(title, sizeof title, "Program Manager on \\\\%s", net_hostname());
 	desktop_run_on(&rd->d, title);
+	session_audio_end(asess, na);
 	conn_send(c, M_BYE, NULL, 0);
 	t->tdrive = NULL;
 	conn_close(c);
@@ -969,7 +1097,7 @@ int remote_run(const char *host, const char *cmd)
 	if (rows > 200)
 		rows = 25;
 	struct hello h;
-	make_hello(&h, cols, rows, cmd ? HELLO_CMD : 0);
+	make_hello(&h, cols, rows, (cmd ? HELLO_CMD : 0) | want_audio());
 	if (cmd)
 		strncpy0(h.cmd, cmd, sizeof h.cmd);
 	char share[VFS_PATH_MAX];
@@ -983,12 +1111,16 @@ int remote_run(const char *host, const char *cmd)
 		return 1;
 	}
 	int done = 0;
+	struct audioin *ai = kzalloc(sizeof *ai);
 	while (!done) {
 		int busy = 0;
 		struct netmsg *m;
-		while ((m = conn_take(c, MSG(M_OUT) | MSG(M_CTRL) | MSG(M_FREQ) | MSG(M_BYE)))) {
+		while ((m = conn_take(c, MSG(M_OUT) | MSG(M_CTRL) | MSG(M_FREQ) | MSG(M_BYE) | MSG(M_AUDIO)))) {
 			busy = 1;
-			if (m->type == M_OUT) {
+			if (m->type == M_AUDIO) {
+				if (ai)
+					audio_in(ai, m, host);
+			} else if (m->type == M_OUT) {
 				char save = m->data[m->len];
 				m->data[m->len] = 0;
 				for (uint32_t i = 0; i < m->len; i++)
@@ -1025,6 +1157,9 @@ int remote_run(const char *host, const char *cmd)
 		if (!busy)
 			task_idle();
 	}
+	if (ai)
+		audio_in_end(ai);
+	kfree(ai);
 	conn_send(c, M_BYE, NULL, 0);
 	conn_close(c);
 	con_attr(7, 0);
@@ -1056,7 +1191,7 @@ int remote_desktop(const char *host)
 	if (d->attach)
 		d->attach(d, NULL);
 	struct hello h;
-	make_hello(&h, d->surf->w, d->surf->h, (d->draws_pointer ? HELLO_POINTER : 0) | HELLO_LZ);
+	make_hello(&h, d->surf->w, d->surf->h, (d->draws_pointer ? HELLO_POINTER : 0) | HELLO_LZ | want_audio());
 	char share[VFS_PATH_MAX];
 	strncpy0(share, task_current()->cwd, sizeof share);
 
@@ -1074,11 +1209,18 @@ int remote_desktop(const char *host)
 		return 1;
 	}
 	int done = 0;
+	struct audioin *ai = kzalloc(sizeof *ai);
 	while (!done && d->alive) {
 		int busy = 0;
 		struct netmsg *m;
-		while ((m = conn_take(c, MSG(M_PIX) | MSG(M_PIXZ) | MSG(M_FREQ) | MSG(M_BYE)))) {
+		while ((m = conn_take(c, MSG(M_PIX) | MSG(M_PIXZ) | MSG(M_FREQ) | MSG(M_BYE) | MSG(M_AUDIO)))) {
 			busy = 1;
+			if (m->type == M_AUDIO) {
+				if (ai)
+					audio_in(ai, m, host);
+				kfree(m);
+				continue;
+			}
 			const uint8_t *pd = m->data;
 			size_t plen = m->len;
 			uint8_t *unz = NULL;
@@ -1145,6 +1287,9 @@ int remote_desktop(const char *host)
 		if (!busy)
 			task_idle();
 	}
+	if (ai)
+		audio_in_end(ai);
+	kfree(ai);
 	conn_send(c, M_BYE, NULL, 0);
 	conn_close(c);
 	display_close(d);

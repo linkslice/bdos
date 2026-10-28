@@ -2922,6 +2922,20 @@ int display_busy(struct display *d)
 	return d && d->busy ? d->busy(d) : 0;
 }
 
+/* do this display's pixels go across a network (bterm, WIN \\HOST)? */
+int display_remote(struct display *d)
+{
+	for (int depth = 0; d && depth < 8; depth++) {
+		if (!strcmp(d->name, "network"))
+			return 1;
+		if (strcmp(d->name, "window"))
+			return 0;
+		struct wm *host = ((struct term_disp *)d)->t->wm;
+		d = host ? host->disp : NULL;
+	}
+	return 0;
+}
+
 /* a desktop in this window captured the pointer (or let it go) */
 static void td_pointer(struct display *d, int shape)
 {

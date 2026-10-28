@@ -11,6 +11,11 @@
  * round trip says a frame is overdue. Receivers keep frames that arrive
  * early. Peers that don't send bitmaps (older bdos and bterm) still work:
  * their frames are simply resent the old way, all of them.
+ *
+ * A DGRAM frame is a message of its own, outside the stream: [u8 type]
+ * then the payload, never resent and never waited for, and it doesn't queue
+ * behind the stream either. Sound goes this way -- late is as bad as lost,
+ * and a lost bit of it mustn't hold up the rest. Older peers ignore it.
  */
 #include "../kernel.h"
 #include "../vfs.h"
@@ -26,7 +31,7 @@
 #define RX_AHEAD	64	/* early frames kept (one ACK bitmap's worth) */
 #define MAX_CONNS	32
 
-enum { F_WHO = 1, F_IAM, F_SYN, F_SYNACK, F_DATA, F_ACK, F_FIN, F_RST };
+enum { F_WHO = 1, F_IAM, F_SYN, F_SYNACK, F_DATA, F_ACK, F_FIN, F_RST, F_DGRAM };
 
 struct hdr {
 	uint8_t dst[6], src[6];
@@ -279,6 +284,38 @@ static void parse_stream(struct conn *c)
 	}
 }
 
+/* a message for the queue, as the stream's are */
+static void queue_msg(struct conn *c, int type, const uint8_t *data, size_t len)
+{
+	struct netmsg *m = kmalloc(sizeof *m + len + 1);
+	if (!m)
+		return;
+	m->next = NULL;
+	m->type = type;
+	m->len = (uint32_t)len;
+	memcpy(m->data, data, len);
+	m->data[len] = 0;
+	if (c->q_tail)
+		c->q_tail->next = m;
+	else
+		c->q = m;
+	c->q_tail = m;
+}
+
+/* a datagram: sent now, once, ahead of anything the stream has waiting */
+int conn_send_dgram(struct conn *c, int type, const void *a, size_t alen, const void *b, size_t blen)
+{
+	if (!c || c->state != 2 || 1 + alen + blen > MAX_PAYLOAD)
+		return E_INVAL;
+	uint8_t buf[MAX_PAYLOAD];
+	buf[0] = (uint8_t)type;
+	memcpy(buf + 1, a, alen);
+	if (blen)
+		memcpy(buf + 1 + alen, b, blen);
+	send_frame(c->peer, F_DGRAM, c->id, 0, 0, buf, 1 + alen + blen);
+	return 0;
+}
+
 static void pump_out(struct conn *c)
 {
 	/* fill the window with new frames */
@@ -507,6 +544,13 @@ static void handle_frame(const uint8_t *buf, int len)
 			if (h->len >= 8)
 				memcpy(&sack, p, 8);
 			handle_ack2(c, h->ack, sack, h->len >= 8);
+		}
+		break;
+	case F_DGRAM:
+		c = find_conn(h->src, h->conn);
+		if (c && c->state == 2 && h->len >= 1) {
+			c->last_heard = uptime_ms();
+			queue_msg(c, p[0], p + 1, h->len - 1u);
 		}
 		break;
 	case F_FIN:

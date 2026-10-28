@@ -9,6 +9,7 @@
 #include "../kernel.h"
 #include "../vfs.h"
 #include "../settings.h"
+#include "../audio.h"
 #include "../net/net.h"
 #include "../net/ntp.h"
 #include "gfx.h"
@@ -23,6 +24,7 @@ static void open_mouse(struct wm *wm);
 static void open_keyboard(struct wm *wm);
 static void open_system(struct wm *wm);
 static void open_dos(struct wm *wm);
+static void open_sound(struct wm *wm);
 
 /* bring an already-open applet forward instead of opening it twice */
 static int raise_existing(struct wm *wm, const char *title)
@@ -60,6 +62,7 @@ static const struct applet {
 	{ "Mouse", "mouse", "Pointer speed, double-click speed, button swap", "mouse", open_mouse },
 	{ "Keyboard", "keyboard", "How soon and how fast keys repeat", "keyboard", open_keyboard },
 	{ "DOS", "game", "How fast DOS programs run, and how their screens fit", "dos", open_dos },
+	{ "Sound", "speaker", "Volume, where this session's sound is heard, and what's playing", "sound", open_sound },
 	{ "System", "computer", "What this machine is and how it's doing", "system", open_system },
 };
 
@@ -147,7 +150,7 @@ int control_open(void *wmv, const char *applet)
 		{ "time", "date" }, { "datetime", "date" }, { "clock", "date" }, { "net", "network" },
 		{ "colours", "themes" }, { "color", "themes" }, { "colour", "themes" }, { "colors", "themes" },
 		{ "theme", "themes" }, { "kbd", "keyboard" },
-		{ "sys", "system" }, { "display", "desktop" },
+		{ "sys", "system" }, { "display", "desktop" }, { "audio", "sound" }, { "volume", "sound" },
 	};
 	const char *key = applet;
 	for (size_t i = 0; i < NELEM(aliases); i++)
@@ -1208,6 +1211,119 @@ static void open_keyboard(struct wm *wm)
 	k->test = form_add(f, FW_EDIT, 64, 186, cw - 80, 24, "");
 	k->ok = ok_cancel(f, cw, ch, 0);
 	k->cancel = k->ok + 1;
+	form_show(wm, f, -1, -1);
+}
+
+/* ---- Sound ----------------------------------------------------------------------------- */
+
+/*
+ * This session's sound: the console's is the machine's (its sound card); a
+ * bterm session's is played on the bterm's machine, or nowhere if it can't.
+ * The volume and mute are this session's alone.
+ */
+struct soundapp {
+	int where, vol, mute, remote, list, test, ok, cancel;
+	int o_vol, o_mute;
+	long o_remote;
+};
+
+static void sound_fill(struct form *f)
+{
+	struct soundapp *a = form_priv(f);
+	form_list_clear(f, a->list);
+	int n = 0;
+	for (int i = 0; i < 64; i++) {
+		char name[16], line[64];
+		int vol;
+		uint32_t rate;
+		int r = audio_stream_info(i, name, sizeof name, &vol, &rate);
+		if (r < 0)
+			break;
+		if (!r)
+			continue;
+		snprintf(line, sizeof line, "%-16s %u Hz", name[0] ? name : "(a program)", rate);
+		form_list_add(f, a->list, line);
+		n++;
+	}
+	if (!n)
+		form_list_add(f, a->list, "Nothing playing");
+}
+
+static void sound_test(void *arg)
+{
+	(void)arg;
+	audio_play_file("C:\\BDOS\\SOUNDS\\CHIMES.WAV", 1);
+}
+
+static void sound_event(struct form *f, int id, int ev)
+{
+	struct soundapp *a = form_priv(f);
+	if (ev == FE_CLOSE) {
+		kfree(a);
+		return;
+	}
+	if (ev == FE_TICK)
+		sound_fill(f);
+	else if (ev == FE_CHANGE && id == a->vol)
+		audio_set_master((int)(form_val(f, a->vol) * 256 / 100));
+	else if (ev == FE_CHANGE && id == a->mute)
+		audio_set_mute((int)form_val(f, a->mute));
+	else if (ev == FE_CHANGE && id == a->remote)
+		setting_set_int("sound.remote", form_val(f, a->remote));
+	else if (ev == FE_CLICK && id == a->test)
+		task_spawn("chimes", sound_test, NULL, NULL);	/* in this session, as everything started here */
+	else if (ev == FE_CLICK && id == a->ok)
+		form_close(f);
+	else if (ev == FE_CLICK && id == a->cancel) {
+		audio_set_master(a->o_vol);
+		audio_set_mute(a->o_mute);
+		setting_set_int("sound.remote", a->o_remote);
+		form_close(f);
+	}
+}
+
+static void open_sound(struct wm *wm)
+{
+	if (raise_existing(wm, "Sound"))
+		return;
+	struct soundapp *a = kzalloc(sizeof *a);
+	if (!a)
+		return;
+	int cw = 400, ch = 340;
+	struct form *f = form_new("Sound", cw, ch, sound_event, a);
+	if (!f) {
+		kfree(a);
+		return;
+	}
+	char name[24], where[96];
+	int audible;
+	int sess = audio_session_info(name, sizeof name, &a->o_vol, &a->o_mute, &audible);
+	if (sess == 0 && !strcmp(audio_device(), "none"))
+		snprintf(where, sizeof where, "No sound card here (bterm sessions still sound)");
+	else if (sess == 0)
+		snprintf(where, sizeof where, "This machine's sound: %s", audio_device());
+	else
+		snprintf(where, sizeof where, "Your session (%s): %s", name,
+		    audible ? "heard where you are" : "silent there");
+	a->o_remote = setting_int("sound.remote");
+	a->where = form_add(f, FW_LABEL, 14, 10, 0, 0, where);
+	form_add(f, FW_GROUP, 8, 32, cw - 16, 84, "Volume");
+	form_add(f, FW_LABEL, 18, 88, 0, 0, "Quiet");
+	form_add(f, FW_LABEL, cw - 66, 88, 0, 0, "Loud");
+	a->vol = form_add(f, FW_SLIDER, 18, 56, cw - 36, 28, NULL);
+	form_range(f, a->vol, 0, 100);
+	form_set_val(f, a->vol, (a->o_vol * 100 + 128) / 256);
+	a->mute = form_add(f, FW_CHECK, 14, 124, 120, 22, "Mute");
+	form_set_val(f, a->mute, a->o_mute);
+	a->test = form_add(f, FW_BUTTON, cw - 104, 122, 90, 26, "Test");
+	form_add(f, FW_LABEL, 14, 156, 0, 0, "Playing now:");
+	a->list = form_add(f, FW_LIST, 14, 174, cw - 28, 82, NULL);
+	a->remote = form_add(f, FW_CHECK, 14, 264, cw - 28, 22, "bterm sessions hear their own sound");
+	form_set_val(f, a->remote, a->o_remote != 0);
+	a->ok = ok_cancel(f, cw, ch, 0);
+	a->cancel = a->ok + 1;
+	sound_fill(f);
+	form_tick(f, 500);
 	form_show(wm, f, -1, -1);
 }
 

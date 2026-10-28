@@ -12,15 +12,34 @@ exec(src.split("# ---- the tests")[0])     # VM, check(), screenshot helpers
 PORT = 40000 + os.getpid() % 2000
 
 
+WAV = os.path.join(tmp, "box1.wav")
+
+
+def windows_of(path):
+    """[(rms, Hz)] for each quarter second of a recording"""
+    import struct
+    raw = open(path, "rb").read()
+    rate = struct.unpack("<I", raw[24:28])[0] or 44100
+    data = raw[44:]
+    out = []
+    step = rate // 4
+    for i in range(0, len(data) // 4 - step, step):
+        s = struct.unpack(f"<{step * 2}h", data[i * 4:(i + step) * 4])[0::2]
+        rms = (sum(v * v for v in s) / step) ** 0.5
+        crossings = sum(1 for a, b in zip(s, s[1:]) if (a < 0) != (b < 0))
+        out.append((rms, crossings * 2))
+    return out
+
+
 class NetVM(VM):
-    def __init__(self, name, mac, role):
+    def __init__(self, name, mac, role, extra=()):
         global disk
         my_disk = os.path.join(tmp, name + ".img")
         shutil.copy(IMG, my_disk)
         disk = my_disk                    # VM() uses the module-level disk
         how = f"listen=127.0.0.1:{PORT}" if role == "listen" else f"connect=127.0.0.1:{PORT}"
         super().__init__(name, ["-nic", "none", "-netdev", f"socket,id=n0,{how}",
-                                "-device", f"e1000,netdev=n0,mac={mac}"])
+                                "-device", f"e1000,netdev=n0,mac={mac}", *extra])
 
 
 def name_box(vm, name):
@@ -30,7 +49,8 @@ def name_box(vm, name):
 
 box2 = NetVM("box2", "52:54:00:00:00:02", "listen")
 time.sleep(1)
-box1 = NetVM("box1", "52:54:00:00:00:01", "connect")
+box1 = NetVM("box1", "52:54:00:00:00:01", "connect",
+             ["-audiodev", f"wav,id=snd0,path={WAV}", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0"])
 try:
     def setup():
         name_box(box2, "BOX2")
@@ -88,6 +108,16 @@ try:
         box1.cmd("cpu \\\\box2 echo made on BOX2 > made.txt", timeout=20)
         box1.cmd("type made.txt", "made on BOX2")
     check("CPU \\\\BOX2 command", cpu)
+
+    def cpu_sound():
+        # a program run on BOX2 for us: its sound comes back and plays here
+        before = len(windows_of(WAV))
+        box1.cmd("cpu \\\\box2 C:\\dosapps\\tone", "TONE done", timeout=40)
+        time.sleep(0.5)
+        w = windows_of(WAV)[before:]
+        loud = [hz for rms, hz in w if rms > 1000 and 950 < hz < 1050]
+        assert len(loud) >= 4, f"BOX1's recording: {[(int(r), h) for r, h in w]}"
+    check("CPU \\\\BOX2: its sound plays here", cpu_sound)
 
     def remote_desktop():
         box1.cmd("cd \\")

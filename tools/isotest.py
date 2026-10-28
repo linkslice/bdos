@@ -5,12 +5,19 @@ the settings it was given. Then the same through the Install bdos window.
 
 Usage: isotest.py <bdos.iso> <outdir> [suite ...]
 """
-import os, re, subprocess, sys, tempfile, time
+import os, re, subprocess, sys, tempfile, time, atexit, shutil
+
+
+def scratch():
+    """a temporary directory, removed when the tests end"""
+    d = tempfile.mkdtemp()
+    atexit.register(shutil.rmtree, d, True)
+    return d
 
 ISO = os.path.abspath(sys.argv[1])
 OUTDIR = sys.argv[2]
 ONLY_ARGS = sys.argv[3:]
-blank = os.path.join(tempfile.mkdtemp(), "blank.img")
+blank = os.path.join(scratch(), "blank.img")
 subprocess.run(["truncate", "-s", "2G", blank], check=True)
 sys.argv = [sys.argv[0], blank, OUTDIR] + ONLY_ARGS
 src = open(os.path.join(os.path.dirname(__file__), "test.py")).read()
@@ -19,7 +26,7 @@ exec(src.split("# ---- the tests")[0])     # VM, check(), suite(); `disk` is a c
 
 def live_shell(vm):
     """The live CD starts the desktop by itself: a shell from Alt+N"""
-    vm.wait_for("bdos 0.11", 120)
+    vm.wait_for("bdos 0.12", 120)
     time.sleep(6)
     start = len(vm.log)
     vm.keys("alt-n")
@@ -53,7 +60,7 @@ if suite("cli"):
         def installed():
             live_shell(vm)                # it starts the desktop, as asked
             vm.cmd("drives", "disk0 partition 2")
-            vm.cmd("ver", "bdos version 0.11")
+            vm.cmd("ver", "bdos version 0.12")
             vm.cmd("hostname", "LIVEBOX")
             vm.cmd("control list", "net.ntp=time.example")
             vm.cmd("dir \\bdos\\live.txt", absent="LIVE.TXT")
@@ -159,9 +166,9 @@ if suite("gui"):
 
 # the way Proxmox makes a VM: the disk on "VirtIO SCSI single", VirtIO network
 if suite("proxmox"):
-    target = os.path.join(tempfile.mkdtemp(), "scsi.img")
+    target = os.path.join(scratch(), "scsi.img")
     subprocess.run(["truncate", "-s", "2G", target], check=True)
-    disk = os.path.join(tempfile.mkdtemp(), "dummy.img")      # VM() always adds a SATA disk
+    disk = os.path.join(scratch(), "dummy.img")      # VM() always adds a SATA disk
     subprocess.run(["truncate", "-s", "1M", disk], check=True)
     pve = ["-device", "virtio-scsi-pci,id=scsihw0",
            "-drive", f"if=none,id=drive-scsi0,format=raw,file={target}",
@@ -183,7 +190,7 @@ if suite("proxmox"):
         def pve_boot():
             live_shell(vm)
             vm.cmd("drives", "sda partition 2")
-            vm.cmd("ver", "bdos version 0.11")
+            vm.cmd("ver", "bdos version 0.12")
             vm.cmd("echo on scsi > \\scsi.txt")
             vm.cmd("type \\scsi.txt", "on scsi")
             vm.cmd("libctest", "libctest: all passed", timeout=60)
@@ -193,7 +200,7 @@ if suite("proxmox"):
 
 # Proxmox's default machine, i440fx, with the disk on its IDE controller
 if suite("ide"):
-    target = os.path.join(tempfile.mkdtemp(), "ide.img")
+    target = os.path.join(scratch(), "ide.img")
     subprocess.run(["truncate", "-s", "2G", target], check=True)
     disk = target
     vm = VM("ide", ["-machine", "pc", "-cdrom", ISO])

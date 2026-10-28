@@ -23,6 +23,7 @@
 #include "dos.h"
 #include "../gate.h"
 #include "../settings.h"
+#include "../audio.h"
 
 int display_want_size(struct display *d, int w, int h);
 extern struct console *console_unwrap(struct console *c);
@@ -218,9 +219,26 @@ static void show_band(struct surface *s, struct display *d, struct rect *band)
 	*band = (struct rect){ 0, 0, 0, 0 };
 }
 
+/* rows the same? eight bytes at a time */
+static int row_same(const uint32_t *a, const uint32_t *b, int n)
+{
+	const uint64_t *x = (const uint64_t *)a, *y = (const uint64_t *)b;
+	int i = 0;
+	for (; i + 1 < n; i += 2)
+		if (*x++ != *y++)
+			return 0;
+	return i >= n || a[i] == b[i];
+}
+
 static void show_changes(struct dosbox *b, struct display *d)
 {
 	struct surface *s = d->surf;
+	if (!display_remote(d)) {	/* on this machine: just say it all changed */
+		struct rect all = { 0, 0, s->w, s->h };
+		surf_touched(s, all);
+		d->flush(d, all);
+		return;
+	}
 	if (!b->shadow || b->shadow_w != s->w || b->shadow_h != s->h || b->shadow_of != s->px) {
 		kfree(b->shadow);
 		b->shadow = kmalloc((size_t)s->w * (size_t)s->h * 4);
@@ -238,7 +256,7 @@ static void show_changes(struct dosbox *b, struct display *d)
 	struct rect band = { 0, 0, 0, 0 };
 	for (int y = 0; y < s->h; y++) {
 		uint32_t *row = s->px + (size_t)y * (size_t)s->pitch, *old = b->shadow + (size_t)y * (size_t)s->w;
-		if (!memcmp(row, old, (size_t)s->w * 4)) {
+		if (row_same(row, old, s->w)) {
 			if (!rect_empty(band))
 				show_band(s, d, &band);
 			continue;
@@ -823,6 +841,7 @@ static int dosbox_run(const char *path, int argc, char **argv, const char *state
 		mbw(b, 0xB8000 + i + 1, 7);
 	}
 	bios_init(b);
+	b->spk.mixer = audio_session_has_mixer_out();	/* the speaker: through the mixer, if it's heard */
 	dos_init(b);
 	b->retcode = last_exit;
 	char tail[130] = "";

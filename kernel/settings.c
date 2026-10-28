@@ -37,6 +37,7 @@ static const struct setting_info known[] = {
 	{ "net.udp", "1", "1 lets bterm and routed peers in over UDP" },
 	{ "net.port", "17979", "UDP port for bterm and BDNET over UDP" },
 	{ "net.password", "", "password bterm must give (empty: none)" },
+	{ "sound.remote", "1", "1: a bterm (or another bdos) that can play sound hears its session's; 0: remote sessions are silent" },
 	{ "net.telnet", "0", "1 runs a telnet server on port 23 (asks for net.password if set)" },
 	{ "clock.seconds", "1", "1 to show seconds on the clock" },
 	{ "net.ntp", "", "time server to set the clock from (pool.ntp.org), empty for none" },

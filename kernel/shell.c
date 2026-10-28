@@ -9,6 +9,7 @@
  * %0-%9, GOTO, IF, FOR, CALL and SHIFT.
  */
 #include "kernel.h"
+#include "audio.h"
 #include "sysapi.h"
 #include "settings.h"
 #include "vfs.h"
@@ -2320,10 +2321,44 @@ static int cmd_usb(struct cmd *c)
 /* SOUND: what plays it */
 static int cmd_sound(struct cmd *c)
 {
-	extern const char *audio_device(void);
-	extern int audio_streams(void);
-	(void)c;
-	kprintf("Sound device: %s\nStreams playing: %d\n", audio_device(), audio_streams());
+	if (c->argc >= 2) {
+		if (!strcasecmp(c->argv[1], "MUTE") || !strcasecmp(c->argv[1], "OFF")) {
+			audio_set_mute(1);
+		} else if (!strcasecmp(c->argv[1], "UNMUTE") || !strcasecmp(c->argv[1], "ON")) {
+			audio_set_mute(0);
+		} else if (!strcasecmp(c->argv[1], "VOLUME") && c->argc >= 3) {
+			long v = strtol(c->argv[2], NULL, 10);
+			audio_set_master((int)(MAX(0, MIN(v, 100)) * 256 / 100));
+		} else {
+			kprintf("Usage: SOUND [MUTE | UNMUTE | VOLUME 0-100]\n");
+			return 1;
+		}
+	}
+	char name[24];
+	int vol, muted, audible;
+	int id = audio_session_info(name, sizeof name, &vol, &muted, &audible);
+	if (id == 0)
+		kprintf("This machine's own sound: %s\n", audio_device());
+	else
+		kprintf("This session's sound (%s): %s\n", name, audible ? "played where you are" :
+		    "silent (nothing there can play it)");
+	kprintf("Volume %d%%%s\n", (vol * 100 + 128) / 256, muted ? ", muted" : "");
+	int n = 0;
+	for (int i = 0; i < 64; i++) {
+		char sn[16];
+		int sv;
+		uint32_t rate;
+		int r = audio_stream_info(i, sn, sizeof sn, &sv, &rate);
+		if (r < 0)
+			break;
+		if (!r)
+			continue;
+		kprintf("  %-15s %6u Hz  volume %3d%%  %3u ms waiting\n", sn[0] ? sn : "(stream)", rate,
+		    (sv * 100 + 128) / 256, audio_queued(i) * 1000 / AUDIO_RATE);
+		n++;
+	}
+	if (!n)
+		kprintf("Nothing playing.\n");
 	return 0;
 }
 
@@ -2384,7 +2419,7 @@ static const struct command commands[] = {
 	{ "NET",     cmd_net,     "Networking: NET VIEW, NET USE" },
 	{ "PING",    cmd_ping,    "Check another machine answers: PING 10.0.2.2" },
 	{ "PLAY",    cmd_play,    "Play a .WAV sound: PLAY \\BDOS\\SOUNDS\\CHIMES.WAV" },
-	{ "SOUND",   cmd_sound,   "Show the sound device" },
+	{ "SOUND",   cmd_sound,   "Where this session's sound goes and what's playing: SOUND [MUTE | UNMUTE | VOLUME 0-100]" },
 	{ "USB",     cmd_usb,     "Show USB keyboards, mice and tablets" },
 	{ "TELNET",  cmd_telnet,  "Log in to another machine: TELNET host [port]" },
 	{ "FETCH",   cmd_fetch,   "Download a web page: FETCH http://host/path [file]" },

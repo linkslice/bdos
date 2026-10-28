@@ -69,7 +69,7 @@ try:
 
         pump(3)
         assert b"Connected to" in out, out
-        run("ver", "bdos version 0.11")
+        run("ver", "bdos version 0.12")
         run("dir T:", "Mine.txt")
         run("type t:\\mine.txt", "this file lives on the host")         # any case
         run('type "T:\\sub dir\\deep.txt"', "deep down")
@@ -129,6 +129,49 @@ try:
         time.sleep(1)
         vm.cmd("ver", "bdos version")
     check("bterm: a DOS game sees a held key", desktop_game)
+
+    def tone_seconds(path):
+        """seconds of a ~1000 Hz tone in bterm's --audio-out recording"""
+        import struct
+        raw = open(path, "rb").read()[44:]
+        n = len(raw) // 4
+        left = struct.unpack(f"<{n * 2}h", raw[:n * 4])[0::2]
+        secs = 0.0
+        step = 4800                                  # 0.1 s
+        for i in range(0, n - step, step):
+            w = left[i:i + step]
+            rms = (sum(v * v for v in w) / step) ** 0.5
+            hz = sum(1 for a, b in zip(w, w[1:]) if (a < 0) != (b < 0)) * 5
+            if rms > 1000 and 900 < hz < 1100:
+                secs += 0.1
+        return secs
+
+    def session_sound(*extra):
+        wav = os.path.abspath(os.path.join(OUTDIR, "tone.wav"))
+        if os.path.exists(wav):
+            os.remove(wav)
+        env = dict(os.environ, BTERM_NO_SOUND_CARD="1", BTERM_STATS="1")
+        r = bterm("-t", "--audio-out", wav, "--type", "\\\\dosapps\\\\tone\\r", "--type-after", "2",
+                  "--quit-after", "9", *extra, f"127.0.0.1:{PORT}", env=env)
+        time.sleep(1)
+        return r, wav
+
+    def sound():
+        # TONE.COM's PC speaker in our session: 2 s of 1000 Hz, played here
+        r, wav = session_sound()
+        err = r.stderr.decode(errors="replace")
+        secs = tone_seconds(wav)
+        assert 1.6 <= secs <= 2.6, f"{secs:.1f} s of tone; {err[-300:]}"
+        # a bad network: lost packets are filled in, and it still plays
+        r, wav = session_sound("--loss", "10", "--delay", "30")
+        err = r.stderr.decode(errors="replace")
+        secs = tone_seconds(wav)
+        assert 1.5 <= secs <= 2.6 and re.search(r"AUDIO: \d+ packets, [1-9]", err), f"{secs:.1f} s; {err[-300:]}"
+        # -q: nothing asked for, nothing sent
+        r, wav = session_sound("-q")
+        assert not os.path.exists(wav) and "TONE done" in r.stdout.decode(errors="replace"), r.stdout[-300:]
+        vm.cmd("ver", "bdos version")
+    check("bterm: the session's sound plays here", sound)
 
     def bench():
         # a bad network (40 ms each way, 2% lost): a dragged window still

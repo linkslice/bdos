@@ -176,6 +176,20 @@ struct dosbox {
 	int kb_wait_cmd;
 	uint8_t cmos_idx;
 	int speaker_hz;
+	/* the PC speaker, played through the mixer: what port 61h and the PIT's
+	 * channel 2 did, and when (the program's clock), drawn as a wave */
+	struct spk {
+		int stream;		/* +1 */
+		int mixer;		/* through the mixer (else the PC's own speaker) */
+		struct { uint64_t t; uint8_t bits; uint32_t hz; } ev[128];
+		int nev;
+		uint64_t last_us;	/* drawn up to here */
+		uint8_t bits;		/* port 61h's low two bits, as of last_us */
+		uint32_t hz;
+		uint32_t phase;
+		int32_t x1, y1;		/* the DC blocker's memory */
+		int idle;		/* blocks of silence since the last sound */
+	} spk;
 	/* video */
 	struct vga vga;
 	struct display *disp;
@@ -244,6 +258,8 @@ struct dosbox {
 };
 
 /* now, as the program sees it (microseconds): the timers, retrace and sound go by this */
+#define PIT_HZ 1193182ULL	/* the 8254's clock */
+
 static inline uint64_t dos_now(struct dosbox *b)
 {
 	return uptime_us() - b->lag_us;

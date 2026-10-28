@@ -7,9 +7,6 @@
 #include "dos.h"
 #include "../gate.h"
 
-#define PIT_HZ 1193182ULL
-
-
 /* ---- the 8259s ------------------------------------------------------------------ */
 
 void pic_raise(struct dosbox *b, int irq)
@@ -242,13 +239,28 @@ static uint8_t pit_in(struct dosbox *b, uint16_t port)
 	return out;
 }
 
-/* ---- the speaker: the real one ---------------------------------------------------- */
+/* ---- the speaker ------------------------------------------------------------------------ */
 
+/*
+ * Through the mixer, so it's heard wherever the session is (bterm, the sound
+ * card): each change goes down with the time it happened, and sound.c draws
+ * the wave. With no mixer to go through (the console, no sound card), the
+ * PC's own speaker, as before.
+ */
 void speaker_update(struct dosbox *b)
 {
-	int hz = 0;
-	if ((b->port61 & 3) == 3 && b->pit[2].reload > 16)
-		hz = (int)(PIT_HZ / b->pit[2].reload);
+	uint32_t pit_hz = b->pit[2].reload > 16 ? (uint32_t)(PIT_HZ / b->pit[2].reload) : 0;
+	if (b->spk.mixer) {
+		struct spk *s = &b->spk;
+		if (s->nev < (int)NELEM(s->ev)) {
+			s->ev[s->nev].t = dos_now(b);
+			s->ev[s->nev].bits = b->port61 & 3;
+			s->ev[s->nev].hz = pit_hz;
+			s->nev++;
+		}
+		return;
+	}
+	int hz = (b->port61 & 3) == 3 ? (int)pit_hz : 0;
 	if (hz < 20 || hz > 20000)
 		hz = 0;
 	if (hz != b->speaker_hz) {

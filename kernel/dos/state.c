@@ -170,6 +170,8 @@ int dosbox_load_state(struct dosbox *b, const char *file)
 	struct display *disp = b->disp;
 	int disp_failed = b->disp_failed, raw_seen = b->raw_seen;
 	int sb_stream = b->sb.stream, opl_stream = b->opl.stream;	/* the mixer's, not the file's */
+	int spk_stream = b->spk.stream;
+	uint32_t *shadow = b->shadow;		/* ours, not the file's */
 	memcpy(b, saved, sizeof *b);
 	kfree(saved);
 	b->cpu.mem = mem;
@@ -187,6 +189,10 @@ int dosbox_load_state(struct dosbox *b, const char *file)
 	b->raw_seen = raw_seen;
 	b->sb.stream = sb_stream;
 	b->opl.stream = opl_stream;
+	b->spk.stream = spk_stream;
+	b->spk.nev = 0;
+	b->spk.last_us = 0;
+	b->shadow = shadow;
 	b->pal32 = NULL;
 	b->errmsg = NULL;
 	b->want_quit = 0;

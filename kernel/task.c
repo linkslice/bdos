@@ -347,6 +347,7 @@ struct task *task_spawn(const char *name, void (*fn)(void *), void *arg,
 	strncpy0(t->cwd, cur->cwd, sizeof t->cwd);
 	t->desk = cur->desk;
 	t->tdrive = cur->tdrive;
+	t->asess = cur->asess;
 
 	uint64_t f = spin_lock_irqsave(&sched_lock);
 	t->next = cur->next;

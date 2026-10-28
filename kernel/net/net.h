@@ -51,6 +51,8 @@ struct conn;
 struct conn *conn_connect(const char *host, int svc, const void *hello, size_t hlen, int *err);
 int conn_send(struct conn *c, int type, const void *data, size_t len);
 int conn_send2(struct conn *c, int type, const void *a, size_t alen, const void *b, size_t blen);
+/* a message outside the stream: now, once, maybe lost (sound); 1399 bytes at most */
+int conn_send_dgram(struct conn *c, int type, const void *a, size_t alen, const void *b, size_t blen);
 /* take the first queued message whose type bit is set in mask (or NULL) */
 struct netmsg *conn_take(struct conn *c, uint32_t mask);
 /* same, waiting up to ms (or forever if ms < 0) */

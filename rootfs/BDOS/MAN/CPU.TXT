@@ -1,0 +1,23 @@
+CPU - run something on another bdos machine
+
+SYNOPSIS
+     CPU \\HOST [command]
+     CPU [command]
+
+DESCRIPTION
+     CPU borrows another bdos machine, as Plan 9's cpu does: with a command
+     it runs the command there and shows its output here; without one it
+     opens a shell there, in this console, until you EXIT.
+
+     Over there, your current drive is T:, which is this machine's current
+     directory: so CPU \\BIGBOX TCC PROG.C compiles the PROG.C here, on the
+     faster machine, and leaves the program here.
+
+     CONTROL net.cpu=\\HOST names the machine CPU uses when you don't.
+
+EXAMPLES
+     CPU \\BIGBOX
+     CPU \\BIGBOX PRIMES 5000000
+
+SEE ALSO
+     MAN CTTY, MAN NET, MAN WIN

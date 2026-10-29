@@ -1,0 +1,54 @@
+BTERM - this machine from another computer
+
+SYNOPSIS
+     bterm [options] host[:port]          (on Linux or macOS)
+     bterm -l [host]
+
+DESCRIPTION
+     bterm is a separate program for Linux and macOS, from
+     github.com/linkslice/bterm (make, with SDL2 for the windows). It
+     connects to a bdos machine and shows its desktop in a window, its
+     screen (-t), or its prompt in the terminal (-c). The folder bterm was
+     started in becomes T: on bdos for that session, and the session's
+     sound plays on the bterm computer.
+
+     Each bterm gets a session of its own: its own T:, its own CD drives,
+     its own sound. The machine's own screen carries on as it was.
+
+OPTIONS
+     -t          the machine's screen: C:\> prompt, DOS games full screen,
+                 WIN for the desktop; EXIT closes it
+     -c          a bdos prompt in this terminal (Ctrl-] hangs up)
+     -d a.iso[,b.iso...]
+                 a CD drive with these discs in its changer, at the first
+                 free letter from D:. Another -d is another drive. On bdos,
+                 DISC or Ctrl+Alt+D changes the disc. The first disc is in
+                 when the session starts.
+     -g WxH      the desktop size (default 1024x768; with -t, 640x480)
+     -s dir      share dir as T: (default: the current directory)
+     -n          share nothing as T:
+     -p password the machine's net.password ($BTERM_PASSWORD works too)
+     -z N        scale the window N times
+     -f          keep the desktop's size; resizing only scales it
+     -q          quiet: don't ask for the session's sound
+     -l [host]   list the bdos machines on the network
+     -v          log what T: is asked for, and the link's numbers
+
+     The port is 17979 unless you say otherwise. Under QEMU, forward it:
+     -nic user,model=e1000,hostfwd=udp:127.0.0.1:17979-:17979
+
+EXAMPLES
+     bterm office                      the desktop of \\OFFICE
+     bterm -t -d doom2.iso office      its screen, with D: a CD
+     bterm -c -d d1.iso,d2.iso,d3.iso -d tools.iso 192.168.1.50
+                                       D: has three discs, E: one
+
+ON THE BDOS SIDE
+     CONTROL net.password=word         bterm must give it
+     CONTROL net.udp=0                 no bterm at all
+     CONTROL sound.remote=0            bterm sessions are silent
+
+     There's no encryption: use bterm on networks you trust.
+
+SEE ALSO
+     MAN NET, MAN DISC, MAN SOUND, bterm(1) on the other computer

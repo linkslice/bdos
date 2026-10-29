@@ -32,7 +32,21 @@ struct blkdev {
 	int (*flush)(struct blkdev *);
 	void *priv;
 	char model[41];
+	/* blk_register's: a disk that stopped answering is taken offline */
+	int failed;
+	int (*drv_read)(struct blkdev *, uint64_t lba, uint32_t count, void *buf);
+	int (*drv_write)(struct blkdev *, uint64_t lba, uint32_t count, const void *buf);
+	int (*drv_flush)(struct blkdev *);
 };
+
+/*
+ * How long a request may take before the disk is given up on. A busy host
+ * (a VM's storage doing a big sync) can stall for seconds; a request still
+ * outstanding after this is one the disk may finish later, into memory
+ * that's been reused -- so the disk is taken offline instead.
+ */
+#define BLK_TIMEOUT_MS	30000
+int blk_timeout(void);		/* a driver's wait gave up: returns -1 */
 
 void blk_register(struct blkdev *b);
 struct blkdev *blk_get(int i);

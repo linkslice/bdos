@@ -12,6 +12,7 @@
 #include "../audio.h"
 #include "../net/net.h"
 #include "../net/ntp.h"
+#include "../cdrom.h"
 #include "gfx.h"
 #include "form.h"
 #include "themes.h"
@@ -25,6 +26,7 @@ static void open_keyboard(struct wm *wm);
 static void open_system(struct wm *wm);
 static void open_dos(struct wm *wm);
 static void open_sound(struct wm *wm);
+static void open_discs(struct wm *wm);
 
 /* bring an already-open applet forward instead of opening it twice */
 static int raise_existing(struct wm *wm, const char *title)
@@ -63,6 +65,7 @@ static const struct applet {
 	{ "Keyboard", "keyboard", "How soon and how fast keys repeat", "keyboard", open_keyboard },
 	{ "DOS", "game", "How fast DOS programs run, and how their screens fit", "dos", open_dos },
 	{ "Sound", "speaker", "Volume, where this session's sound is heard, and what's playing", "sound", open_sound },
+	{ "Disc Changer", "cd", "CD drives: which disc is in, change it, eject it, add one", "discs", open_discs },
 	{ "System", "computer", "What this machine is and how it's doing", "system", open_system },
 };
 
@@ -151,6 +154,7 @@ int control_open(void *wmv, const char *applet)
 		{ "colours", "themes" }, { "color", "themes" }, { "colour", "themes" }, { "colors", "themes" },
 		{ "theme", "themes" }, { "kbd", "keyboard" },
 		{ "sys", "system" }, { "display", "desktop" }, { "audio", "sound" }, { "volume", "sound" },
+		{ "disc", "discs" }, { "cd", "discs" }, { "cdrom", "discs" }, { "changer", "discs" },
 	};
 	const char *key = applet;
 	for (size_t i = 0; i < NELEM(aliases); i++)
@@ -1327,6 +1331,222 @@ static void open_sound(struct wm *wm)
 	form_show(wm, f, -1, -1);
 }
 
+/* ---- Disc Changer ------------------------------------------------------------------------ */
+
+/*
+ * The CD drives this session sees (MOUNTed images, bterm -d's), and the
+ * discs in each one's changer. Ctrl+Alt+D opens it on the desktop; in a
+ * DOS game the same key shows the changer over the game.
+ */
+#define DC_LINES 64
+
+struct discapp {
+	int list, put, eject, add, mount, close, status;
+	struct { char letter; int disc; } line[DC_LINES];	/* disc -2: the drive's own line */
+	int n;
+	uint32_t seen;			/* the state shown: redrawn when it changes */
+};
+
+static uint32_t dc_state(void)
+{
+	char letters[27];
+	int n = cd_letters(letters, sizeof letters);
+	uint32_t h = (uint32_t)n;
+	for (int i = 0; i < n; i++) {
+		struct changer *ch = changer_at(letters[i]);
+		h = h * 31 + (uint32_t)letters[i];
+		h = h * 31 + changer_generation(ch) * 7 + (uint32_t)changer_discs(ch);
+	}
+	return h;
+}
+
+static void dc_fill(struct form *f)
+{
+	struct discapp *a = form_priv(f);
+	long sel = form_val(f, a->list);
+	form_list_clear(f, a->list);
+	a->n = 0;
+	char letters[27];
+	int nd = cd_letters(letters, sizeof letters);
+	for (int d = 0; d < nd && a->n < DC_LINES; d++) {
+		struct changer *ch = changer_at(letters[d]);
+		char line[96];
+		snprintf(line, sizeof line, "%c:  %s%s", letters[d], changer_source(ch),
+		    changer_local(ch) ? "" : "  (bterm)");
+		form_list_add(f, a->list, line);
+		a->line[a->n].letter = letters[d];
+		a->line[a->n++].disc = -2;
+		int cur = changer_current(ch);
+		for (int k = 0; k < changer_discs(ch) && a->n < DC_LINES; k++) {
+			snprintf(line, sizeof line, "    %s %2d  %s%s%s", k == cur ? "=>" : "  ", k + 1,
+			    changer_disc_name(ch, k), k == cur && changer_label(ch)[0] ? "   " : "",
+			    k == cur ? changer_label(ch) : "");
+			form_list_add(f, a->list, line);
+			a->line[a->n].letter = letters[d];
+			a->line[a->n++].disc = k;
+		}
+		if (cur < 0 && a->n < DC_LINES) {
+			form_list_add(f, a->list, "    => (empty)");
+			a->line[a->n].letter = letters[d];
+			a->line[a->n++].disc = -1;
+		}
+	}
+	if (!nd)
+		form_list_add(f, a->list, "No CD drives. Mount an image to make one.");
+	if (sel >= 0 && sel < a->n)
+		form_set_val(f, a->list, sel);
+	a->seen = dc_state();
+}
+
+static void dc_say(struct form *f, const char *msg)
+{
+	struct discapp *a = form_priv(f);
+	form_set_text(f, a->status, msg);
+}
+
+static struct changer *dc_selected(struct form *f, int *disc)
+{
+	struct discapp *a = form_priv(f);
+	long i = form_val(f, a->list);
+	if (i < 0 || i >= a->n)
+		return NULL;
+	*disc = a->line[i].disc;
+	return changer_at(a->line[i].letter);
+}
+
+static void dc_put_in(struct form *f)
+{
+	int disc;
+	struct changer *ch = dc_selected(f, &disc);
+	char msg[96];
+	if (!ch || disc < 0) {
+		dc_say(f, "Choose a disc first.");
+		return;
+	}
+	int r = changer_insert(ch, disc);
+	if (r)
+		snprintf(msg, sizeof msg, "%s can't be read: %s", changer_disc_name(ch, disc), vfs_strerror(r));
+	else
+		snprintf(msg, sizeof msg, "%c: now has %s.", changer_letter(ch), changer_disc_name(ch, disc));
+	dc_say(f, msg);
+	dc_fill(f);
+}
+
+static int dc_alive(struct wm *wm, struct form *f)
+{
+	return form_find(wm, "Disc Changer") == f;
+}
+
+static void dc_added(struct wm *wm, void *arg, const char *text)
+{
+	struct form *f = arg;
+	if (!text || !*text || !dc_alive(wm, f))
+		return;
+	int disc;
+	struct changer *ch = dc_selected(f, &disc);
+	char err[160];
+	if (!ch) {
+		dc_say(f, "Choose a drive first.");
+		return;
+	}
+	if (cd_add_file((char)changer_letter(ch), text, err, sizeof err))
+		dc_say(f, err);
+	else
+		dc_say(f, "Added. Double-click it to put it in.");
+	dc_fill(f);
+}
+
+static void dc_mounted(struct wm *wm, void *arg, const char *text)
+{
+	struct form *f = arg;
+	if (!text || !*text || !dc_alive(wm, f))
+		return;
+	char letter = 'D';
+	while (letter <= 'Z' && vfs_drive(letter))
+		letter++;
+	char err[160], msg[96];
+	if (letter > 'Z')
+		dc_say(f, "There's no drive letter free.");
+	else if (cd_mount_files(letter, text, err, sizeof err))
+		dc_say(f, err);
+	else {
+		snprintf(msg, sizeof msg, "%c: is a new CD drive.", letter);
+		dc_say(f, msg);
+	}
+	dc_fill(f);
+}
+
+static void dc_event(struct form *f, int id, int ev)
+{
+	struct discapp *a = form_priv(f);
+	if (ev == FE_CLOSE) {
+		kfree(a);
+		return;
+	}
+	if (ev == FE_TICK) {
+		if (dc_state() != a->seen)
+			dc_fill(f);	/* changed by DISC, a game, or bterm going */
+		return;
+	}
+	if ((ev == FE_CLICK && id == a->put) || (ev == FE_DBLCLICK && id == a->list)) {
+		dc_put_in(f);
+	} else if (ev == FE_CLICK && id == a->eject) {
+		int disc;
+		struct changer *ch = dc_selected(f, &disc);
+		if (!ch) {
+			dc_say(f, "Choose a drive first.");
+			return;
+		}
+		changer_insert(ch, -1);
+		char msg[64];
+		snprintf(msg, sizeof msg, "%c: is empty.", changer_letter(ch));
+		dc_say(f, msg);
+		dc_fill(f);
+	} else if (ev == FE_CLICK && id == a->add) {
+		int disc;
+		if (!dc_selected(f, &disc)) {
+			dc_say(f, "Choose the drive to add it to.");
+			return;
+		}
+		ui_prompt(form_wm(f), "Add a Disc", "The image file to add to this drive's changer:", "C:\\", dc_added, f);
+	} else if (ev == FE_CLICK && id == a->mount) {
+		ui_prompt(form_wm(f), "New CD Drive", "Image file(s) for a new drive (commas between discs):", "C:\\",
+		    dc_mounted, f);
+	} else if (ev == FE_CLICK && id == a->close) {
+		form_close(f);
+	}
+}
+
+static void open_discs(struct wm *wm)
+{
+	if (raise_existing(wm, "Disc Changer"))
+		return;
+	struct discapp *a = kzalloc(sizeof *a);
+	if (!a)
+		return;
+	int cw = 460, ch = 330;
+	struct form *f = form_new("Disc Changer", cw, ch, dc_event, a);
+	if (!f) {
+		kfree(a);
+		return;
+	}
+	form_add(f, FW_LABEL, 14, 10, 0, 0, "CD drives, and the discs in their changers:");
+	a->list = form_add(f, FW_LIST, 14, 30, cw - 28 - 112, 214, NULL);
+	int bx = cw - 14 - 104, bw = 104;
+	a->put = form_add(f, FW_BUTTON, bx, 30, bw, 26, "Put In");
+	form_default(f, a->put);
+	a->eject = form_add(f, FW_BUTTON, bx, 62, bw, 26, "Eject");
+	a->add = form_add(f, FW_BUTTON, bx, 104, bw, 26, "Add Disc...");
+	a->mount = form_add(f, FW_BUTTON, bx, 136, bw, 26, "New Drive...");
+	a->close = form_add(f, FW_BUTTON, bx, 218, bw, 26, "Close");
+	a->status = form_add(f, FW_LABEL, 14, 254, 0, 0, "Double-click a disc to put it in.");
+	form_add(f, FW_LABEL, 14, 278, 0, 0, "In a game, Ctrl+Alt+D changes discs as it waits.");
+	form_add(f, FW_LABEL, 14, 296, 0, 0, "At the prompt: DISC, and MOUNT D: GAME.ISO.");
+	dc_fill(f);
+	form_tick(f, 1000);
+	form_show(wm, f, -1, -1);
+}
+
 /* ---- DOS ------------------------------------------------------------------------------- */
 
 static const char *const dos_speed_names[] = { "XT (4.77 MHz)", "AT (286)", "386", "486", "Pentium",
@@ -1384,7 +1604,7 @@ static void open_dos(struct wm *wm)
 	struct dosapp *d = kzalloc(sizeof *d);
 	if (!d)
 		return;
-	int cw = 480, ch = 350;
+	int cw = 480, ch = 368;
 	struct form *f = form_new("DOS", cw, ch, dos_event, d);
 	if (!f) {
 		kfree(d);
@@ -1412,10 +1632,11 @@ static void open_dos(struct wm *wm)
 			form_set_val(f, d->scale, i);
 	d->trace = form_add(f, FW_CHECK, 14, 188, cw - 28, 22, "When a program crashes, list what it last ran");
 	form_set_val(f, d->trace, strtol(d->o_trace, NULL, 10) != 0);
-	form_add(f, FW_GROUP, 8, 218, cw - 16, 82, "Keys in a DOS window");
-	form_add(f, FW_LABEL, 18, 238, 0, 0, "Ctrl+Alt+F11   freeze it to a state file");
-	form_add(f, FW_LABEL, 18, 256, 0, 0, "Ctrl+Alt+F12   go back to the frozen state");
-	form_add(f, FW_LABEL, 18, 274, 0, 0, "Ctrl+Alt+F10   what the screen is doing (tracing on)");
+	form_add(f, FW_GROUP, 8, 218, cw - 16, 100, "Keys in a DOS window");
+	form_add(f, FW_LABEL, 18, 238, 0, 0, "Ctrl+Alt+D     change the CD (the game waits)");
+	form_add(f, FW_LABEL, 18, 256, 0, 0, "Ctrl+Alt+F11   freeze it to a state file");
+	form_add(f, FW_LABEL, 18, 274, 0, 0, "Ctrl+Alt+F12   go back to the frozen state");
+	form_add(f, FW_LABEL, 18, 292, 0, 0, "Ctrl+Alt+F10   what the screen is doing (tracing on)");
 	d->ok = ok_cancel(f, cw, ch, 1);
 	d->cancel = d->ok + 1;
 	form_show(wm, f, -1, -1);

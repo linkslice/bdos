@@ -26,7 +26,7 @@ exec(src.split("# ---- the tests")[0])     # VM, check(), suite(); `disk` is a c
 
 def live_shell(vm):
     """The live CD starts the desktop by itself: a shell from Alt+N"""
-    vm.wait_for("bdos 0.13", 120)
+    vm.wait_for("bdos 0.14", 120)
     time.sleep(6)
     start = len(vm.log)
     vm.keys("alt-n")
@@ -60,7 +60,7 @@ if suite("cli"):
         def installed():
             live_shell(vm)                # it starts the desktop, as asked
             vm.cmd("drives", "disk0 partition 2")
-            vm.cmd("ver", "bdos version 0.13")
+            vm.cmd("ver", "bdos version 0.14")
             vm.cmd("hostname", "LIVEBOX")
             vm.cmd("control list", "net.ntp=time.example")
             vm.cmd("dir \\bdos\\live.txt", absent="LIVE.TXT")
@@ -164,6 +164,38 @@ if suite("gui"):
     finally:
         vm.close()
 
+# Proxmox's other VirtIO choice: the disk on "VirtIO Block" (vda)
+if suite("vblk"):
+    target = os.path.join(scratch(), "vblk.img")
+    subprocess.run(["truncate", "-s", "2G", target], check=True)
+    disk = os.path.join(scratch(), "dummy.img")      # VM() always adds a SATA disk
+    subprocess.run(["truncate", "-s", "1M", disk], check=True)
+    vb = ["-drive", f"if=none,id=drive-virtio0,format=raw,file={target}",
+          "-device", "virtio-blk-pci,drive=drive-virtio0,bootindex=1",
+          "-nic", "none", "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"]
+    vm = VM("vblk", vb + ["-drive", f"if=none,id=cd,media=cdrom,readonly=on,file={ISO}",
+                          "-device", "ide-cd,drive=cd,bus=ide.2,bootindex=0"])
+    try:
+        def vblk_install():
+            live_shell(vm)
+            out = vm.cmd("fdisk", ["vda", "2.0 GB"])
+            n = re.search(r"\n\s+(\d+)\s+vda", out).group(1)
+            vm.cmd(f"install {n} /Y", ["Copying", f"bdos is on disk {n}"], timeout=300)
+        check("installing onto a VirtIO Block disk", vblk_install)
+    finally:
+        vm.close()
+    vm = VM("vblk2", vb)
+    try:
+        def vblk_boot():
+            live_shell(vm)
+            vm.cmd("drives", "vda partition 2")
+            vm.cmd("echo on vda > \\vda.txt")
+            vm.cmd("type \\vda.txt", "on vda")
+            vm.cmd("chkdsk", "No problems found", timeout=60)
+        check("it boots from the VirtIO Block disk", vblk_boot)
+    finally:
+        vm.close()
+
 # the way Proxmox makes a VM: the disk on "VirtIO SCSI single", VirtIO network
 if suite("proxmox"):
     target = os.path.join(scratch(), "scsi.img")
@@ -190,7 +222,7 @@ if suite("proxmox"):
         def pve_boot():
             live_shell(vm)
             vm.cmd("drives", "sda partition 2")
-            vm.cmd("ver", "bdos version 0.13")
+            vm.cmd("ver", "bdos version 0.14")
             vm.cmd("echo on scsi > \\scsi.txt")
             vm.cmd("type \\scsi.txt", "on scsi")
             vm.cmd("libctest", "libctest: all passed", timeout=60)

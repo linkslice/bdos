@@ -38,6 +38,7 @@
 #define ROM_IDLE	0x08E0	/* HLT loop */
 #define ROM_VBE_BANK	0x08F0	/* VESA window function */
 #define ROM_VGA_FUNCS	0x0900	/* INT 10h 1Bh: the static functionality table */
+#define ROM_CD_DEV	0x0920	/* MSCDEX's device header, "MSCD001" (INT 2Fh 1501h) */
 #define ROM_SYSCONF	0xE6F5	/* INT 15h C0h: the system configuration table */
 #define ROM_DUMMY_IRET	0xFF53	/* where unused vectors point, as on a real BIOS */
 #define ROM_PM_STUBS	0x1000	/* DPMI protected-mode interrupt stubs: 256 x 4 */
@@ -162,6 +163,7 @@ struct dosbox {
 	const char *errmsg;
 	char errbuf[96];
 	char prog[VFS_PATH_MAX];
+	uint32_t cd_seen[26];		/* MSCDEX: each CD drive's disc as last asked about */
 	/* pacing: instructions per millisecond, 0 for flat out */
 	long speed;
 	uint64_t t0_us, ran;
@@ -241,6 +243,10 @@ struct dosbox {
 	int raw_ctrl, raw_alt;
 	int rcap;		/* the pointer's captured, on a whole display of our own (bterm -t) */
 	int state_req;		/* 1 save, 2 load, at the next chance */
+	int disc_req;		/* Ctrl+Alt+D: the CD changer, at the next chance */
+	char banner[80];	/* a line over the picture for a moment: "D: DISC2.ISO" */
+	uint64_t banner_until;
+	int banner_up, banner_text_pending;
 	/* XMS */
 	struct { int used; uint32_t base, size; int locks; } xms[MAX_EXT];
 	int hma_used;
@@ -294,7 +300,10 @@ void vga_out(struct dosbox *b, uint16_t port, uint8_t v);
 void vga_set_mode(struct dosbox *b, int mode, int clear);
 int vga_is_text(struct dosbox *b);
 int vga_text_size(struct dosbox *b, int *cols, int *rows);
-void vga_render(struct dosbox *b, struct surface *s, struct rect area);	/* scaled into area */
+void vga_render(struct dosbox *b, struct surface *s, struct rect area);
+void disc_menu(struct dosbox *b);				/* discmenu.c: Ctrl+Alt+D */
+void disc_banner_draw(struct dosbox *b, struct surface *s);
+void disc_banner_text(struct dosbox *b);	/* scaled into area */
 void vga_screen_size(struct dosbox *b, int *w, int *h);
 int vga_vbe(struct dosbox *b);			/* INT 10h AH=4F */
 extern const uint8_t vga_font8x16[256 * 16];

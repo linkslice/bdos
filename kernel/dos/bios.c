@@ -110,6 +110,11 @@ void bios_init(struct dosbox *b)
 	 * and 400 lines, 8 fonts, palettes and the rest */
 	static const uint8_t funcs[16] = { 0xFF, 0xE0, 0x0F, 0, 0, 0, 0, 0x07, 0x02, 0x08, 0xE7, 0x0C, 0, 0, 0, 0 };
 	rom(b, ROM_VGA_FUNCS, funcs, sizeof funcs);
+	/* the CD driver MSCDEX would have loaded: its requests come through INT 2Fh 1510h */
+	static const uint8_t cdev[22 + 1] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xC8,
+	    (uint8_t)(ROM_CD_DEV + 22), 0x09, (uint8_t)(ROM_CD_DEV + 22), 0x09,
+	    'M', 'S', 'C', 'D', '0', '0', '1', ' ', 0, 0, 0, 1, 0xCB };
+	rom(b, ROM_CD_DEV, cdev, sizeof cdev);
 	dpmi_rom(b);
 	/* INT 15h C0h's table: AT-class, extended BIOS area, RTC, keyboard intercept */
 	static const uint8_t conf[] = { 0x08, 0x00, 0xFC, 0x01, 0x00, 0x74, 0x40, 0x00, 0x00, 0x00 };

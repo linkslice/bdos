@@ -143,7 +143,7 @@ $(B)/dosapps/%: dos/%.asm dos/lib.inc
 	@touch $@
 
 # The C: drive contents: rootfs/ plus generated programs
-$(B)/rootfs.stamp: tools/gen_sounds.py $(ROOTFS_FILES) $(DOS_BINS) $(NATIVE_BINS) $(B)/lib/libc.a $(B)/lib/crt0.o \
+$(B)/rootfs.stamp: tools/gen_sounds.py tools/mktestiso.py $(ROOTFS_FILES) $(DOS_BINS) $(NATIVE_BINS) $(B)/lib/libc.a $(B)/lib/crt0.o \
 		$(B)/lib/crtn.o $(B)/tcc/TCC.EXE $(B)/tcc/libtcc1.a $(B)/BOOTX64.EFI $(B)/KERNEL.SYS
 	rm -rf $(B)/rootfs
 	cp -r rootfs $(B)/rootfs
@@ -166,6 +166,7 @@ $(B)/rootfs.stamp: tools/gen_sounds.py $(ROOTFS_FILES) $(DOS_BINS) $(NATIVE_BINS
 	mkdir -p $(B)/rootfs/DOSAPPS
 	cp $(B)/dosapps/*.COM $(B)/dosapps/*.EXE $(B)/rootfs/DOSAPPS/
 	cp dos/*.asm dos/*.inc $(B)/rootfs/DOSAPPS/
+	python3 tools/mktestiso.py $(B)/rootfs/BDOS/TESTS	# CD images for MOUNT and the tests
 	mkdir -p $(B)/rootfs/BDOS/BOOT		# what INSTALL puts on a new disk's EFI partition
 	cp $(B)/BOOTX64.EFI $(B)/KERNEL.SYS $(B)/rootfs/BDOS/BOOT/
 	touch $@

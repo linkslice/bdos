@@ -1,0 +1,34 @@
+SOUND - where the sound goes
+
+SYNOPSIS
+     SOUND
+     SOUND MUTE | UNMUTE | VOLUME 0-100
+     PLAY file.wav
+
+DESCRIPTION
+     Every session has its own sound: the machine's console is one, and
+     each bterm session is another. SOUND says where this session's goes,
+     its volume, and what's playing in it.
+
+     The console's sound goes to the machine's sound card (Intel HDA, as
+     most PCs have and QEMU's -device intel-hda gives). With none - a
+     server, a VM with no sound card - it goes nowhere, and that's fine.
+
+     A bterm session's sound plays on the bterm computer, whether or not
+     this machine has a sound card: a DOS game's Sound Blaster, its FM
+     music and PC speaker, PLAY, and native programs. bterm -q doesn't ask
+     for it, and CONTROL sound.remote=0 keeps every bterm session silent.
+
+     MUTE and VOLUME are this session's alone.
+
+     DOS programs see a Sound Blaster 16 at port 220h, IRQ 7, DMA 1 and 5
+     (their BLASTER variable says so), an OPL2 at 388h, and the PC
+     speaker, whatever the machine really has.
+
+EXAMPLES
+     SOUND
+     SOUND VOLUME 40
+     PLAY C:\BDOS\SOUNDS\CHIMES.WAV
+
+SEE ALSO
+     CONTROL SOUND (the applet), MAN BTERM

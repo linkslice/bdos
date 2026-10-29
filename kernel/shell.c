@@ -10,6 +10,7 @@
  */
 #include "kernel.h"
 #include "audio.h"
+#include "cdrom.h"
 #include "sysapi.h"
 #include "settings.h"
 #include "vfs.h"
@@ -403,6 +404,7 @@ static int dir_and_pattern(const char *in, char *dir, size_t dn, char *pat, size
 /* ---- commands ---------------------------------------------------------------- */
 
 static int cmd_help(struct cmd *c);
+static int cmd_man(struct cmd *c);
 static int cmd_alias(struct cmd *c);
 static int run_line(char *line);
 static int run_batch(const char *path, int argc, char **argv);
@@ -573,7 +575,8 @@ static int cmd_dir(struct cmd *c)
 	if (r) {
 		if (c->unix_style)
 			return fail(c, a, r);
-		kprintf(r == E_BADDRIVE ? "Invalid drive specification\n" : "File not found\n");
+		kprintf("%s\n", r == E_BADDRIVE ? "Invalid drive specification" :
+		    r == E_NOTREADY ? vfs_strerror(r) : "File not found");
 		return 1;
 	}
 	struct pager pg;
@@ -704,6 +707,121 @@ static int cmd_install(struct cmd *c)
 {
 	extern int install_cmd(int argc, char **argv, void *desk);
 	return install_cmd(c->argc, c->argv, task_current()->desk);
+}
+
+/* ---- CD drives: MOUNT and DISC ---- */
+
+static void show_changer(struct changer *ch)
+{
+	int cur = changer_current(ch), n = changer_discs(ch);
+	kprintf("%c:  %s\n", changer_letter(ch), changer_source(ch));
+	for (int i = 0; i < n; i++)
+		kprintf("    %s %d  %s%s%s\n", i == cur ? "=>" : "  ", i + 1, changer_disc_name(ch, i),
+		    i == cur && changer_label(ch)[0] ? "  - " : "", i == cur ? changer_label(ch) : "");
+	if (cur < 0)
+		kprintf("    (empty)\n");
+}
+
+static int list_cds(void)
+{
+	char letters[27];
+	if (!cd_letters(letters, sizeof letters)) {
+		kprintf("No CD drives. MOUNT D: GAME.ISO makes one, as does bterm -d game.iso.\n");
+		return 0;
+	}
+	for (char *l = letters; *l; l++)
+		show_changer(changer_at(*l));
+	return 0;
+}
+
+static int drive_arg(const char *a)
+{
+	return a && isalpha((unsigned char)a[0]) && a[1] == ':' && !a[2] ? toupper((unsigned char)a[0]) : 0;
+}
+
+/* MOUNT D: GAME.ISO[,DISC2.ISO...]   MOUNT D: /D   MOUNT */
+static int cmd_mount(struct cmd *c)
+{
+	if (!arg(c, 0))
+		return list_cds();
+	int letter = drive_arg(arg(c, 0));
+	if (!letter) {
+		kprintf("Usage: MOUNT D: GAME.ISO[,DISC2.ISO...]   MOUNT D: /D   MOUNT\n");
+		return 1;
+	}
+	if (has_flag(c, 'D')) {
+		int r = cd_unmount((char)letter);
+		if (r) {
+			kprintf(r == E_ACCES ? "%c: is bterm's: it goes when you disconnect\n" : "%c: isn't a CD drive\n", letter);
+			return 1;
+		}
+		return 0;
+	}
+	if (!arg(c, 1)) {
+		struct changer *ch = changer_at((char)letter);
+		if (!ch) {
+			kprintf("%c: isn't a CD drive\n", letter);
+			return 1;
+		}
+		show_changer(ch);
+		return 0;
+	}
+	char err[160];
+	if (cd_mount_files((char)letter, arg(c, 1), err, sizeof err)) {
+		kprintf("%s\n", err);
+		return 1;
+	}
+	show_changer(changer_at((char)letter));
+	return 0;
+}
+
+/* DISC   DISC D:   DISC D: 2 | NEXT | EJECT */
+static int cmd_disc(struct cmd *c)
+{
+	if (!arg(c, 0))
+		return list_cds();
+	int letter = drive_arg(arg(c, 0));
+	struct changer *ch = letter ? changer_at((char)letter) : NULL;
+	if (!ch) {
+		kprintf(letter ? "%c: isn't a CD drive\n" : "Usage: DISC [D: [n | NEXT | EJECT | ADD file]]\n", letter);
+		return 1;
+	}
+	const char *what = arg(c, 1);
+	if (!what) {
+		show_changer(ch);
+		return 0;
+	}
+	if (!strcasecmp(what, "ADD")) {
+		char err[160];
+		if (!arg(c, 2)) {
+			kprintf("Usage: DISC %c: ADD GAME2.ISO\n", letter);
+			return 1;
+		}
+		if (cd_add_file((char)letter, arg(c, 2), err, sizeof err)) {
+			kprintf("%s\n", err);
+			return 1;
+		}
+		show_changer(changer_at((char)letter));
+		return 0;
+	}
+	int n = changer_discs(ch), want;
+	if (!strcasecmp(what, "EJECT"))
+		want = -1;
+	else if (!strcasecmp(what, "NEXT"))
+		want = n ? (changer_current(ch) + 1) % n : -1;
+	else
+		want = (int)strtol(what, NULL, 10) - 1;
+	if (want < -1 || want >= n) {
+		kprintf("%c: has %d disc%s\n", letter, n, n == 1 ? "" : "s");
+		return 1;
+	}
+	int r = changer_insert(ch, want);
+	if (r) {
+		kprintf("Disc %d (%s) can't be read: %s\n", want + 1, changer_disc_name(ch, want), vfs_strerror(r));
+		return 1;
+	}
+	show_changer(ch);
+	return 0;
 }
 
 /* SUBST [X: [path | /D]]: a drive letter for a directory */
@@ -1418,6 +1536,8 @@ static int cmd_drives(struct cmd *c)
 	(void)c;
 	kprintf("\n");
 	vfs_drives(drive_cb, NULL);
+	for (int i = 0; vfs_unmounted(i); i++)
+		kprintf("   %s\n", vfs_unmounted(i));
 	kprintf("\n");
 	return 0;
 }
@@ -1594,7 +1714,7 @@ static int cmd_control(struct cmd *c)
 		if (t->desk && (!a0 || strcasecmp(a0, "LIST"))) {
 			if (control_open(t->desk, a0)) {
 				kprintf("No such Control Panel applet: %s\n"
-				    "Try DATE, NETWORK, DESKTOP, THEMES, MOUSE, KEYBOARD or SYSTEM.\n", a0);
+				    "Try DATE, NETWORK, DESKTOP, THEMES, MOUSE, KEYBOARD, DOS, SOUND, DISCS or SYSTEM.\n", a0);
 				return 1;
 			}
 			return 0;
@@ -2410,6 +2530,7 @@ static const struct command commands[] = {
 	{ "HWINFO",  cmd_hwinfo,  "Show PCI devices and disks" },
 	{ "IF",      cmd_if,      "IF [NOT] EXIST f | ERRORLEVEL n | a==b  command" },
 	{ "LABEL",   cmd_label,   "Set a drive's volume label" },
+	{ "MAN",     cmd_man,     "The manual: MAN AFTERBOOT to start, MAN page, MAN /K word" },
 	{ "MD",      cmd_md,      "Make a directory" },
 	{ "MEM",     cmd_mem,     "Show memory usage" },
 	{ "MKDIR",   cmd_md,      NULL },
@@ -2430,6 +2551,8 @@ static const struct command commands[] = {
 	{ "PAUSE",   cmd_pause,   "Wait for a key" },
 	{ "PROMPT",  cmd_prompt,  "Set the prompt ($P path $G > $D date $T time)" },
 	{ "RD",      cmd_rd,      "Remove an empty directory" },
+	{ "MOUNT",   cmd_mount,   "CD images as a drive: MOUNT D: GAME.ISO[,DISC2.ISO], MOUNT D: /D" },
+	{ "DISC",    cmd_disc,    "CD drives and their discs: DISC D: 2, NEXT, EJECT, ADD X.ISO (Ctrl+Alt+D in a game)" },
 	{ "SUBST",   cmd_subst,   "Make a folder a drive: SUBST A: T:\\LEMMINGS" },
 	{ "REBOOT",  cmd_reboot,  "Restart the computer" },
 	{ "REM",     cmd_rem,     "Comment" },
@@ -2471,7 +2594,7 @@ static const struct alias aliases[] = {
 	{ "pwd",    "CD" },
 	{ "free",   "MEM" },
 	{ "uname",  "VER" },
-	{ "man",    "HELP" },
+	{ "man",    "MAN" },
 	{ "grep",   "FIND" },
 	{ "less",   "MORE" },
 	{ "ps",     "TASKS" },
@@ -2515,6 +2638,11 @@ static int cmd_help(struct cmd *c)
 		for (size_t i = 0; i < NELEM(commands); i++)
 			if (!strcasecmp(commands[i].name, c->argv[1]) && commands[i].help) {
 				kprintf("%s - %s\n", commands[i].name, commands[i].help);
+				char mp[VFS_PATH_MAX];
+				struct vstat st;
+				snprintf(mp, sizeof mp, "C:\\BDOS\\MAN\\%s.TXT", commands[i].name);
+				if (!vfs_stat(mp, &st))
+					kprintf("MAN %s has more.\n", commands[i].name);
 				return 0;
 			}
 		kprintf("No help for %s. Try HELP, or HELP SYS for the SYS calls.\n", c->argv[1]);
@@ -2532,6 +2660,125 @@ static int cmd_help(struct cmd *c)
 	kprintf("\nRun programs (.COM, .EXE, .BAT, .BAS, .C) by typing their name.\n"
 	    "Redirect with > >> < and chain with |. Unix names work too: "
 	    "ls, cat, cp, rm...\nType ALIAS to see them all, and HELP SYS for the calls programs can make.\n\n");
+	return 0;
+}
+
+/* ---- MAN: the manual, C:\BDOS\MAN\*.TXT, a page at a time ---------------------------------- */
+
+#define MAN_DIR "C:\\BDOS\\MAN"
+
+/* a page's first line: "CHKDSK - check a drive, and fix it" */
+static void man_title(const char *text, size_t n, char *out, size_t cap)
+{
+	size_t k = 0;
+	while (k < n && text[k] != '\n' && text[k] != '\r' && k + 1 < cap) {
+		out[k] = text[k];
+		k++;
+	}
+	out[k] = 0;
+}
+
+struct man_list {
+	struct vstat v[96];
+	int n;
+};
+
+static int man_cb(void *arg, struct vstat *st)
+{
+	struct man_list *l = arg;
+	const char *dot = strrchr(st->name, '.');
+	if (st->type == VFS_FILE && dot && !strcasecmp(dot, ".TXT") && l->n < (int)NELEM(l->v))
+		l->v[l->n++] = *st;
+	return 0;
+}
+
+
+/* MAN   MAN page   MAN /K word */
+static int cmd_man(struct cmd *c)
+{
+	const char *name = arg(c, 0);
+	int search = has_flag(c, 'K');
+	struct pager pg;
+	pager_init(&pg, 1);
+	if (!name || search) {
+		struct man_list *l = kzalloc(sizeof *l);
+		if (!l)
+			return 1;
+		vfs_list(MAN_DIR, man_cb, l);
+		for (int i = 1; i < l->n; i++)		/* in name order */
+			for (int j = i; j > 0 && strcasecmp(l->v[j - 1].name, l->v[j].name) > 0; j--) {
+				struct vstat t = l->v[j];
+				l->v[j] = l->v[j - 1];
+				l->v[j - 1] = t;
+			}
+		if (!search) {
+			kprintf("\nThe manual: MAN AFTERBOOT to start, MAN name for one page, MAN /K word to search.\n\n");
+			pager_line(&pg);
+			pager_line(&pg);
+		}
+		int shown = 0;
+		for (int i = 0; i < l->n; i++) {
+			char path[VFS_PATH_MAX], title[96];
+			snprintf(path, sizeof path, "%s\\%s", MAN_DIR, l->v[i].name);
+			size_t n;
+			int e;
+			char *text = vfs_slurp(path, &n, &e);
+			if (!text)
+				continue;
+			int hit = 1;
+			if (search) {
+				hit = 0;
+				size_t wl = strlen(name);
+				for (size_t k = 0; wl && k + wl <= n && !hit; k++)
+					hit = !strncasecmp(text + k, name, wl);
+			}
+			man_title(text, n, title, sizeof title);
+			kfree(text);
+			if (!hit)
+				continue;
+			shown++;
+			kprintf("  %s\n", title);
+			if (pager_line(&pg))
+				break;
+		}
+		if (!l->n)
+			kprintf("There's no manual here (" MAN_DIR " is empty). HELP lists the commands.\n");
+		else if (search && !shown)
+			kprintf("No page mentions %s.\n", name);
+		if (!search)
+			kprintf("\n");
+		kfree(l);
+		return 0;
+	}
+	char base[16], path[VFS_PATH_MAX];
+	strncpy0(base, name, sizeof base);
+	char *dot = strchr(base, '.');
+	if (dot)
+		*dot = 0;
+	snprintf(path, sizeof path, "%s\\%s.TXT", MAN_DIR, base);
+	size_t n;
+	int e;
+	char *text = vfs_slurp(path, &n, &e);
+	if (!text) {
+		for (size_t i = 0; i < NELEM(commands); i++)
+			if (!strcasecmp(commands[i].name, base) && commands[i].help) {
+				kprintf("There's no manual page for %s, but HELP has a line:\n  %s - %s\n",
+				    commands[i].name, commands[i].name, commands[i].help);
+				return 1;
+			}
+		kprintf("No manual page for %s. MAN lists them; MAN /K %s searches them.\n", base, base);
+		return 1;
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (text[i] == '\r')
+			continue;
+		con_putc(text[i]);
+		if (text[i] == '\n' && pager_line(&pg))
+			break;
+	}
+	if (n && text[n - 1] != '\n')
+		con_putc('\n');
+	kfree(text);
 	return 0;
 }
 

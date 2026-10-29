@@ -79,6 +79,8 @@ static const char *guess_icon(const char *cmd)
 		return "network";
 	if (!strncasecmp(cmd, "@files", 6))
 		return "folder";
+	if (!strcasecmp(cmd, "@control discs"))
+		return "cd";
 	if (!strncasecmp(cmd, "@control", 8))
 		return "control";
 	if (!strcasecmp(cmd, "@clock"))

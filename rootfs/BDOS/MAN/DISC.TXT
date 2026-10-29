@@ -1,0 +1,41 @@
+DISC - change the disc in a CD drive
+
+SYNOPSIS
+     DISC
+     DISC d:
+     DISC d: n | NEXT | EJECT
+     DISC d: ADD image.iso
+
+DESCRIPTION
+     A CD drive (from MOUNT, or bterm -d) has a changer: a list of discs,
+     one of them in the drive. DISC lists every CD drive and its discs; =>
+     marks the one that's in, with its volume label.
+
+     DISC d: n puts disc n in (counting from 1). NEXT puts the next one in,
+     going round. EJECT leaves the drive empty: programs reading it get
+     "not ready", as with a real drive. ADD puts another image file in the
+     changer of a MOUNTed drive (bterm's discs are bterm's: give it another
+     -d).
+
+   In a game
+     Ctrl+Alt+D, in any DOS program, pauses it and shows the changer over
+     its screen. Up and down choose a disc, Enter puts it in, E ejects, Esc
+     goes back without changing anything. A line at the top of the screen
+     says what's in for a few seconds afterwards. Programs that write lines
+     rather than draw a screen get a line to answer instead.
+
+     The game sees the change as a real one: MSCDEX reports the media
+     changed, as games check before asking for disc 2.
+
+   On the desktop
+     Ctrl+Alt+D opens the Disc Changer (also in the Control Panel and in
+     Accessories), which does all of this with buttons.
+
+EXAMPLES
+     DISC                 what's in where?
+     DISC D: 2            the second disc
+     DISC D: NEXT
+     DISC D: ADD C:\GAMES\CD4.ISO
+
+SEE ALSO
+     MAN MOUNT, MAN KEYS, MAN BTERM

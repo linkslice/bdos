@@ -1,0 +1,27 @@
+FDISK - list the disks, and partition one for bdos
+
+SYNOPSIS
+     FDISK
+     FDISK n /GPT [/Y]
+
+DESCRIPTION
+     FDISK on its own lists the disks bdos found, numbered from 0, with
+     their device names (vda, sda, nvme0...), sizes, models, and the
+     partitions on each. The disk C: is on says so.
+
+     FDISK n /GPT erases disk n and gives it a GPT partition table with two
+     partitions: a small EFI system partition (what the PC boots from) and
+     a bdosfs partition on the rest. It asks you to type YES first; /Y
+     doesn't ask. FORMAT n is the next step, or let INSTALL do all of it.
+
+     Disk numbers are FDISK's, the same ones FORMAT and INSTALL take. They
+     can change when disks are added or removed, so look before you type.
+
+     bdos won't partition the disk it's running from.
+
+EXAMPLES
+     FDISK               what's here?
+     FDISK 1 /GPT        make disk 1 ready for bdos (then FORMAT 1)
+
+SEE ALSO
+     MAN FORMAT, MAN INSTALL, HWINFO, DRIVES

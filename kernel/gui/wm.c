@@ -2191,6 +2191,15 @@ static void handle_key(struct wm *wm, int k)
 		taskman_open(wm, NULL);
 		return;
 	}
+	/* Ctrl+Alt+D: the Disc Changer -- unless a DOS program has the keys, which shows its own */
+	if ((k == 4 || k == (KEY_ALT | 4) || k == (KEY_ALT | 'd') || k == (KEY_ALT | 'D')) &&
+	    (k == (KEY_ALT | 4) || ((input_mods() | wm->rawmods) & 6) == 6)) {
+		struct win *fw = wm->focus;
+		if (!(fw && fw->kind == W_TERM && fw->term && fw->term->task && fw->term->task->in_dos)) {
+			control_open(wm, "discs");
+			return;
+		}
+	}
 	if (k == (KEY_ALT | 'n')) {
 		open_term(wm, "Shell", NULL, 80, 25, -1, -1);
 		return;

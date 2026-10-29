@@ -1,0 +1,39 @@
+INSTALL - put bdos on a disk
+
+SYNOPSIS
+     INSTALL
+     INSTALL n [/UPGRADE] [/PROMPT] [/Y]
+
+DESCRIPTION
+     INSTALL copies the running bdos onto disk n (the number FDISK shows)
+     and makes the disk bootable: it partitions it (an EFI system partition
+     and a bdosfs one), formats it, writes the boot loader, copies C: across
+     and saves your settings. Then take the CD out, or boot from that disk,
+     and restart.
+
+     It erases the disk, after asking you to type YES (/Y doesn't ask).
+
+     /UPGRADE puts a newer bdos onto a disk that already has one, keeping
+     your files and settings: boot the new CD and INSTALL n /UPGRADE.
+
+     /PROMPT makes the installed bdos start at the C:\> prompt rather than
+     the desktop.
+
+     On the desktop, INSTALL with no number (or Install bdos in Program
+     Manager) opens a window that does the same, with a progress bar.
+
+     INSTALL with no number at the prompt lists the disks.
+
+IF IT STOPS PART WAY
+     If the machine stops during an install (a VM host's storage stalled,
+     the power went), just INSTALL again: it starts from scratch. Until
+     then, booting that disk may say its partition can't be mounted. That
+     isn't something CHKDSK can fix; MAN CHKDSK says why.
+
+EXAMPLES
+     INSTALL             which disk?
+     INSTALL 0           bdos on disk 0
+     INSTALL 0 /UPGRADE  a newer bdos, same files
+
+SEE ALSO
+     MAN FDISK, MAN FORMAT, MAN AFTERBOOT

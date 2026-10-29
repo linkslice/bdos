@@ -1,0 +1,21 @@
+MAN - the manual
+
+SYNOPSIS
+     MAN
+     MAN page
+     MAN /K word
+
+DESCRIPTION
+     MAN on its own lists the pages, with a line about each. MAN page
+     shows one, a screenful at a time: any key for more, Q or Esc to stop.
+     MAN /K word lists the pages that mention a word.
+
+     MAN AFTERBOOT is the place to start.
+
+     The pages are text files in C:\BDOS\MAN: TYPE and EDIT work on them,
+     and a NAME.TXT you put there is MAN NAME.
+
+     HELP lists every command with a line each; HELP name shows one.
+
+SEE ALSO
+     HELP, MAN AFTERBOOT

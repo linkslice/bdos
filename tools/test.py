@@ -226,6 +226,9 @@ class VM:
 
 def check(name, fn, *args):
     global passed, failed
+    only = os.environ.get("ONLY")    # ONLY="bterm -d|DHCP": just the checks whose names match
+    if only and not re.search(only, name):
+        return
     try:
         fn(*args)
         passed += 1
@@ -246,7 +249,7 @@ def suite(name):
 
 def t_boot(vm):
     out = vm.wait_for("C:\\>", 90)
-    assert "bdos 0.13" in out, out
+    assert "bdos 0.14" in out, out
     assert "Welcome to bdos" in out, out
     assert "Bad command" not in out, "AUTOEXEC.BAT hit an error:\n" + out
     assert "panic" not in out, out
@@ -254,7 +257,7 @@ def t_boot(vm):
 
 
 def t_basics(vm):
-    vm.cmd("ver", "bdos version 0.13 (x86-64)")
+    vm.cmd("ver", "bdos version 0.14 (x86-64)")
     vm.cmd("dir", ["Volume in drive C is BDOS", "Read Me First.txt", "<DIR>", "bytes free"])
     vm.cmd("dir/w", "[GAMES]")
     vm.cmd("ls", "GAMES/")
@@ -401,7 +404,7 @@ def t_persist(vm):
 def t_ps2(vm):
     start = len(vm.log)
     vm.keys("v", "e", "r", "ret")
-    vm.wait_for("bdos version 0.13", 10, start)
+    vm.wait_for("bdos version 0.14", 10, start)
 
 
 def t_basic(vm):
@@ -679,10 +682,16 @@ def t_dosgfx(vm):
     for prog, shot in (("mode13", "22-mode13"), ("planar", "23-planar"), ("modex", "24-modex")):
         start = len(vm.log)
         vm.send(prog + "\r")
-        time.sleep(3)
-        vm.screenshot(shot)
-        vm.keys("spc")                          # the window has the keys now
-        vm.wait_for(prog.upper() + " done", 15, start)
+        time.sleep(8)                           # let it finish drawing (TCG is slow) --
+        vm.screenshot(shot)                     # (a key mid-draw can slow it to a crawl)
+        for tries in range(3):                  # the window has the keys now
+            vm.keys("spc")
+            try:
+                vm.wait_for(prog.upper() + " done", 8, start)
+                break
+            except AssertionError:
+                if tries == 2:
+                    raise
         time.sleep(0.5)
     # the mouse: click in the middle of the window, then the right button ends it
     start = len(vm.log)
@@ -768,7 +777,7 @@ def t_desktop(vm):
     vm.send("\r")                                   # Program Manager: launch Shell
     vm.wait_for("C:\\>", 15, start)
     time.sleep(0.5)
-    vm.cmd("ver", "bdos version 0.13")
+    vm.cmd("ver", "bdos version 0.14")
     vm.cmd("echo color #3a3a6e > DESK$")
     vm.cmd("type DESK$", ["desktop level 0", "color #3a3a6e"])
     vm.cmd("type MOUSE$", " ")
@@ -801,7 +810,7 @@ def t_desktop(vm):
     time.sleep(0.8)
     vm.keys("ret")
     time.sleep(1.5)
-    vm.cmd("ver", "bdos version 0.13")              # back at the full-screen prompt
+    vm.cmd("ver", "bdos version 0.14")              # back at the full-screen prompt
 
 
 def t_win31(vm):
@@ -1322,13 +1331,120 @@ def t_screens(vm):
     vm.screenshot("02-session")
 
 
+def t_cdrom(vm):
+    # MOUNT an image changer, the DISC command, and MSCDEX as DOS programs see it
+    t = "C:\\BDOS\\TESTS\\"
+    vm.cmd("mount", "No CD drives")
+    vm.cmd(f"mount D: {t}DISC1.ISO,{t}DISC2.ISO", ["DISC1.ISO", "BDOS_DISC1", "DISC2.ISO"])
+    vm.cmd("type D:\\README.TXT", "This is disc one")
+    vm.cmd('dir "D:\\Game Data"', ["A Long File Name.txt", "72,000"])
+    vm.cmd("dir D:\\GAMEDA~1", "A Long File Name.txt")
+    vm.cmd("echo x > D:\\NEW.TXT", "denied", timeout=10)
+    vm.cmd("\\dosapps\\cdcheck", ["MSCDEX 2.23", "1 drive(s) from D:", "volume BDOS_DISC1", "media changed: 0 then 1"])
+    vm.cmd("disc D: next", "=> 2  DISC2.ISO")
+    vm.cmd("type D:\\README.TXT", "This is disc two")
+    vm.cmd("disc D: eject", "(empty)")
+    vm.cmd("dir D:", "Not ready")
+    vm.cmd("disc D: 1", "=> 1  DISC1.ISO")
+    # Ctrl+Alt+D in a game: the changer over the picture, the game paused
+    vm.cmd("cd \\dosapps")
+    start = len(vm.log)
+    vm.send("mode13\r")
+    time.sleep(8)                               # (it's drawn: a key mid-draw is slow on TCG)
+    vm.keys("ctrl-alt-d")
+    time.sleep(1)
+    vm.screenshot("40-discmenu")
+    vm.keys("down")
+    time.sleep(0.3)
+    vm.keys("ret")
+    time.sleep(0.7)
+    vm.screenshot("41-discbanner")
+    vm.keys("spc")
+    vm.wait_for("MODE13 done", 15, start)
+    vm.cmd("disc D:", "=> 2  DISC2.ISO")
+    # and in a program writing lines: a line of its own
+    start = len(vm.log)
+    vm.send("askname\r")
+    time.sleep(2)
+    vm.keys("ctrl-alt-d")
+    time.sleep(1)
+    vm.keys("1")
+    time.sleep(0.5)
+    vm.send("bob\r")
+    vm.wait_for("meet you, bob", 15, start)
+    assert "[Disc Changer]" in vm.log[start:].decode(errors="replace")
+    vm.cmd("disc D:", "=> 1  DISC1.ISO")
+    vm.cmd("cd \\")
+    # on the desktop: Ctrl+Alt+D is the Disc Changer applet
+    start = len(vm.log)
+    vm.send("win\r")
+    time.sleep(3)
+    vm.send("\r")                                   # Program Manager: launch Shell
+    vm.wait_for("C:\\>", 15, start)
+    time.sleep(0.5)
+    sx, sy, sw, sh = vm.windows()[0]["Shell"]
+
+    def refocus_shell():
+        vm.point(sx + 40, sy + sh - 20)
+        time.sleep(0.3)
+        vm.click()
+        time.sleep(0.3)
+    vm.keys("ctrl-alt-d")
+    time.sleep(1.5)
+    vm.screenshot("42-discchanger")
+    refocus_shell()
+    wins, _ = vm.windows()
+    assert "Disc Changer" in wins, wins
+    vm.cmd("echo raise Disc Changer > DESK$")
+    time.sleep(0.5)
+    vm.keys("alt-q")
+    time.sleep(0.6)
+    refocus_shell()
+    vm.cmd("disc D: 2")
+    vm.cmd("control discs")
+    time.sleep(1.5)
+    vm.screenshot("43-discchanger2")
+    refocus_shell()
+    wins, _ = vm.windows()
+    assert "Disc Changer" in wins, wins
+    vm.cmd("echo raise Disc Changer > DESK$")
+    time.sleep(0.5)
+    vm.keys("alt-q")
+    time.sleep(0.6)
+    vm.keys("alt-x")
+    time.sleep(0.8)
+    vm.keys("ret")
+    time.sleep(1.5)
+    vm.cmd("ver", "bdos version")
+    vm.cmd("mount D: /D")
+    vm.cmd("dir D:", "Invalid drive")
+
+
+def t_man(vm):
+    vm.cmd("man", ["AFTERBOOT - things to check", "CHKDSK - check a drive", "MOUNT - CD images"])
+    vm.cmd("man chkdsk | find \"mounted\"", "CHKDSK works on mounted drives")
+    vm.cmd("MAN /K Keychron", "KEYS - the keys")
+    vm.cmd("man -k Keychron", "KEYS - the keys")       # the Unix way too
+    vm.cmd("man nosuch", "No manual page for nosuch")
+    vm.cmd("man dir", "no manual page for DIR, but HELP has a line")
+    vm.cmd("help chkdsk", "MAN CHKDSK has more")
+    start = len(vm.log)
+    vm.send("man afterboot\r")                     # a screenful, then -- More --
+    vm.wait_for("-- More --", 10, start)
+    vm.send("q")
+    vm.wait_for("C:\\>", 10, start)
+    vm.cmd("man afterboot > C:\\AB.TXT")           # no pager into a file
+    vm.cmd("find \"SEE ALSO\" C:\\AB.TXT", "SEE ALSO")
+    vm.cmd("del C:\\AB.TXT")
+
+
 vm = VM()
 try:
     check("boot to C:\\>", t_boot, vm)
     for name, fn in [("basics", t_basics), ("dirs", t_dirs), ("files", t_files),
                      ("pipes", t_pipes), ("batch", t_batch), ("edit", t_edit),
                      ("chkdsk", t_chkdsk), ("ps2", t_ps2), ("basic", t_basic), ("c", t_c), ("control", t_control), ("dos", t_dos), ("dos2", t_dos2), ("dosfull", t_dosfull), ("dosgfx", t_dosgfx),
-                     ("desktop", t_desktop), ("win31", t_win31), ("smp", t_smp), ("winkeys", t_winkeys), ("termui", t_termui), ("applets", t_applets), ("dpmi", t_dpmi), ("native", t_native), ("tcc", t_tcc), ("screens", t_screens),
+                     ("desktop", t_desktop), ("win31", t_win31), ("smp", t_smp), ("winkeys", t_winkeys), ("termui", t_termui), ("applets", t_applets), ("dpmi", t_dpmi), ("native", t_native), ("tcc", t_tcc), ("screens", t_screens), ("cdrom", t_cdrom), ("man", t_man),
                      ("persist", t_persist)]:
         if suite(name):
             check(name, fn, vm)

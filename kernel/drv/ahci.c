@@ -120,12 +120,12 @@ static int issue(struct port *p, uint8_t cmd, uint64_t lba, uint32_t count,
 	mmio_barrier();
 	wr(p, P_CI, 1);
 
-	uint64_t until = uptime_ms() + 10000;
+	uint64_t until = uptime_ms() + BLK_TIMEOUT_MS;
 	while (rd(p, P_CI) & 1) {
 		if (rd(p, P_IS) & IS_TFES)
 			return -1;
 		if (uptime_ms() > until)
-			return -1;
+			return blk_timeout();
 		cpu_pause();
 	}
 	mmio_barrier();
@@ -273,10 +273,70 @@ void ahci_init(void)
 static struct blkdev *blks[16];
 static int nblks;
 
+/* Disk requests are made one at a time (under the big lock), so one flag does. */
+static int timed_out;
+
+int blk_timeout(void)
+{
+	timed_out = 1;
+	return -1;
+}
+
+static void gave_up(struct blkdev *b)
+{
+	b->failed = 1;
+	kprintf("\n%s (%s) didn't answer for %d seconds, so bdos has stopped using it until\n"
+	    "it restarts: nothing more is read from it or written to it. Its drive letters\n"
+	    "now report errors. Check the disk (or the VM host's storage), then restart.\n",
+	    b->name, b->model, BLK_TIMEOUT_MS / 1000);
+}
+
+static int g_read(struct blkdev *b, uint64_t lba, uint32_t count, void *buf)
+{
+	if (b->failed)
+		return -1;
+	timed_out = 0;
+	int r = b->drv_read(b, lba, count, buf);
+	if (r && timed_out)
+		gave_up(b);
+	return r;
+}
+
+static int g_write(struct blkdev *b, uint64_t lba, uint32_t count, const void *buf)
+{
+	if (b->failed)
+		return -1;
+	timed_out = 0;
+	int r = b->drv_write(b, lba, count, buf);
+	if (r && timed_out)
+		gave_up(b);
+	return r;
+}
+
+static int g_flush(struct blkdev *b)
+{
+	if (b->failed)
+		return -1;
+	if (!b->drv_flush)
+		return 0;
+	timed_out = 0;
+	int r = b->drv_flush(b);
+	if (r && timed_out)
+		gave_up(b);
+	return r;
+}
+
 void blk_register(struct blkdev *b)
 {
-	if (nblks < (int)NELEM(blks))
-		blks[nblks++] = b;
+	if (nblks >= (int)NELEM(blks))
+		return;
+	b->drv_read = b->read;
+	b->drv_write = b->write;
+	b->drv_flush = b->flush;
+	b->read = g_read;
+	b->write = g_write;
+	b->flush = g_flush;
+	blks[nblks++] = b;
 }
 
 struct blkdev *blk_get(int i) { return i < nblks ? blks[i] : NULL; }

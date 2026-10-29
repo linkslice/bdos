@@ -1,0 +1,21 @@
+CTTY - move this shell to another console
+
+SYNOPSIS
+     CTTY [COM1 | CON | \\HOST]
+
+DESCRIPTION
+     CTTY on its own says which console this shell uses.
+
+     CTTY COM1 moves it to the first serial port (AUX is the same), and
+     CTTY CON brings it back to the screen and keyboard.
+
+     CTTY \\HOST makes this console a terminal on another bdos machine:
+     you get a prompt there, with this machine's current directory as its
+     T:, until you EXIT.
+
+EXAMPLES
+     CTTY COM1
+     CTTY \\OFFICE
+
+SEE ALSO
+     MAN CPU, MAN NET

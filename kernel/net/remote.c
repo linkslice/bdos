@@ -11,6 +11,7 @@
  */
 #include "../kernel.h"
 #include "../vfs.h"
+#include "../cdrom.h"
 #include "../gui/wm.h"
 #include "net.h"
 #include "../lz.h"
@@ -29,7 +30,10 @@ enum {
 enum { C_CLEAR = 1, C_GOTO, C_ATTR, C_CURSOR };
 
 enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAME,
-	F_SETATTR, F_INFO };
+	F_SETATTR, F_INFO,
+	F_CDREAD,	/* bterm -d: bytes of a disc image (arg: the drive, path: the disc number) */
+	F_CDLIST,	/* bterm -d: the drives and their discs, a line each: "a.iso|b.iso" */
+};
 
 #define HELLO_SHARE	1
 #define HELLO_CMD	2	/* run this one command and hang up (CPU \\HOST cmd) */
@@ -37,6 +41,7 @@ enum { F_STAT = 1, F_LIST, F_READ, F_WRITE, F_CREATE, F_TRUNC, F_REMOVE, F_RENAM
 #define HELLO_LZ	4	/* the viewer understands M_PIXZ */
 #define HELLO_DRAW	8	/* the viewer draws for itself: send operations, not pixels */
 #define HELLO_AUDIO	16	/* the far end plays sound: send the session's (M_AUDIO) */
+#define HELLO_CD	32	/* the far end has CD images for us (bterm -d): F_CDLIST */
 
 struct hello {
 	int32_t w, h;		/* columns/rows (TTY) or pixels (DESK) */
@@ -655,6 +660,164 @@ int remote_session_desktop(struct console *c)
 	return 1;
 }
 
+/* ---- a session's CD drives, from bterm -d ---------------------------------------------- */
+
+struct rcd {
+	struct rfs *r;
+	int slot;
+};
+
+struct rcd_disc {
+	struct rcd *d;
+	char num[12];
+};
+
+static long rcd_read(struct cdsrc *s, uint64_t off, void *buf, size_t n)
+{
+	struct rcd_disc *dd = s->ctx;
+	struct rcd *d = dd->d;
+	const char *disc = dd->num;
+	size_t done = 0;
+	while (done < n) {
+		uint32_t chunk = (uint32_t)MIN(n - done, (size_t)64 * 1024);
+		int32_t res;
+		struct netmsg *m = rfs_call(d->r, F_CDREAD, d->slot, off + done, chunk, disc, NULL, 0, &res);
+		if (!m || res < 0) {
+			kfree(m);
+			return done ? (long)done : (res < 0 ? res : E_IO);
+		}
+		size_t got = MIN((size_t)res, m->len - sizeof(struct frep));
+		memcpy((uint8_t *)buf + done, m->data + sizeof(struct frep), got);
+		kfree(m);
+		done += got;
+		if (got < chunk)
+			break;
+	}
+	return (long)done;
+}
+
+static void rcd_close(struct cdsrc *s)
+{
+	kfree(s->ctx);
+}
+
+static int rcd_open(void *ctx, int i, struct cdsrc *out)
+{
+	struct rcd_disc *dd = kzalloc(sizeof *dd);
+	if (!dd)
+		return E_NOMEM;
+	dd->d = ctx;
+	snprintf(dd->num, sizeof dd->num, "%d", i);
+	out->read = rcd_read;
+	out->close = rcd_close;
+	out->ctx = dd;
+	out->size = 0;
+	return 0;
+}
+
+struct session_cds {
+	struct rcd rcd[8];
+	struct changer *ch[8];
+	int n;
+	struct rfs *own;		/* made for the CDs alone (no T:) */
+	void *drives;			/* the session's own drive letters */
+};
+
+/* ask bterm what it has, and give each drive the next free letter from D: */
+static struct session_cds *session_cds_start(struct conn *c, struct rfs *t, const char *host, int want)
+{
+	struct session_cds *sc = kzalloc(sizeof *sc);
+	if (!sc)
+		return NULL;
+	/* a session's MOUNTs are its own, as its T: is */
+	struct task *me = task_current();
+	if (!me->sdrives)
+		me->sdrives = sc->drives = vfs_session_new();
+	if (!want)
+		return sc;
+	struct rfs *r = t;
+	if (!r) {
+		r = sc->own = rfs_new(c, 0, "", host);
+		if (!r) {
+			kfree(sc);
+			return NULL;
+		}
+	}
+	int32_t res;
+	struct netmsg *m = rfs_call(r, F_CDLIST, 0, 0, 0, "", NULL, 0, &res);
+	if (!m || res <= 0) {
+		kfree(m);
+		return sc;
+	}
+	char *list = (char *)m->data + sizeof(struct frep);
+	m->data[m->len] = 0;		/* (there's room: messages keep a byte spare) */
+	char src[48];
+	snprintf(src, sizeof src, "\\\\%s", host);
+	char letter = 'D';
+	for (char *line = list; *line && sc->n < (int)NELEM(sc->ch); ) {
+		char *end = strchr(line, '\n');
+		if (end)
+			*end = 0;
+		while (letter <= 'Z' && vfs_drive(letter))
+			letter++;
+		if (letter > 'Z')
+			break;
+		struct rcd *d = &sc->rcd[sc->n];
+		d->r = r;
+		d->slot = sc->n;
+		struct changer *ch = changer_new(letter, src, rcd_open, d, 1);
+		if (ch) {
+			for (char *name = line; name && *name; ) {
+				char *bar = strchr(name, '|');
+				if (bar)
+					*bar = 0;
+				changer_add(ch, name);
+				name = bar ? bar + 1 : NULL;
+			}
+			changer_insert(ch, 0);
+			sc->ch[sc->n++] = ch;
+		}
+		if (!end)
+			break;
+		line = end + 1;
+	}
+	kfree(m);
+	return sc;
+}
+
+/* under the hello: "D: is DISC1.ISO (1 of 3)" */
+static void session_cds_say(struct session_cds *sc)
+{
+	for (int i = 0; sc && i < sc->n; i++) {
+		struct changer *ch = sc->ch[i];
+		int n = changer_discs(ch);
+		if (n > 1)
+			kprintf("%c: is a CD drive: %s, disc 1 of %d (DISC %c: NEXT, or Ctrl+Alt+D, for the next).\n",
+			    changer_letter(ch), changer_disc_name(ch, 0), n, changer_letter(ch));
+		else
+			kprintf("%c: is a CD drive: %s.\n", changer_letter(ch), changer_disc_name(ch, 0));
+	}
+	if (sc && sc->n)
+		kprintf("\n");
+}
+
+static void session_cds_end(struct session_cds *sc)
+{
+	if (!sc)
+		return;
+	for (int i = 0; i < sc->n; i++)
+		changer_free(sc->ch[i]);
+	if (sc->own)
+		rfs_free(sc->own);
+	if (sc->drives) {
+		struct task *me = task_current();
+		if (me->sdrives == sc->drives)
+			me->sdrives = NULL;
+		vfs_session_free(sc->drives);
+	}
+	kfree(sc);
+}
+
 static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 {
 	struct hello h;
@@ -692,6 +855,7 @@ static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	snprintf(who, sizeof who, "\\\\%s", h.host[0] ? h.host : conn_peer(c));
 	struct netaudio *na;
 	int asess = session_audio_start(c, h.flags, who, &na);
+	struct session_cds *cds = session_cds_start(c, tdr, h.host[0] ? h.host : conn_peer(c), h.flags & HELLO_CD);
 	if (h.flags & HELLO_CMD) {
 		/* a CPU server's job: run it from the caller's own directory, T: */
 		h.cmd[sizeof h.cmd - 1] = 0;
@@ -702,9 +866,11 @@ static void tty_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 		kprintf("Connected to \\\\%s (%s %s, %d core%s). T: is %s on \\\\%s. EXIT to disconnect.\n\n",
 		    net_hostname(), BDOS_NAME, BDOS_VERSION, ncpus, ncpus == 1 ? "" : "s",
 		    h.share[0] ? h.share : "nothing", h.host);
+		session_cds_say(cds);
 		shell_task(NULL);
 	}
 	session_audio_end(asess, na);
+	session_cds_end(cds);
 	conn_send(c, M_BYE, NULL, 0);
 	t->con = NULL;
 	t->tdrive = NULL;
@@ -1053,6 +1219,7 @@ static void window_service(struct conn *c, const uint8_t *hello_raw, size_t hlen
 	snprintf(who, sizeof who, "\\\\%s", h.host[0] ? h.host : conn_peer(c));
 	struct netaudio *na;
 	int asess = session_audio_start(c, h.flags, who, &na);
+	struct session_cds *cds = session_cds_start(c, tdr, h.host[0] ? h.host : conn_peer(c), h.flags & HELLO_CD);
 	if (screen) {
 		extern struct console *scon_new(struct display *d, const char *name);
 		extern void scon_free(struct console *c);
@@ -1063,6 +1230,7 @@ static void window_service(struct conn *c, const uint8_t *hello_raw, size_t hlen
 			kprintf("Connected to \\\\%s (%s %s, %d core%s). T: is %s on \\\\%s. EXIT to disconnect.\n\n",
 			    net_hostname(), BDOS_NAME, BDOS_VERSION, ncpus, ncpus == 1 ? "" : "s",
 			    h.share[0] ? h.share : "nothing", h.host);
+			session_cds_say(cds);
 			shell_task(NULL);
 			t->con = NULL;
 			scon_free(sc);
@@ -1073,6 +1241,7 @@ static void window_service(struct conn *c, const uint8_t *hello_raw, size_t hlen
 		desktop_run_on(&rd->d, title);
 	}
 	session_audio_end(asess, na);
+	session_cds_end(cds);
 	conn_send(c, M_BYE, NULL, 0);
 	t->tdrive = NULL;
 	conn_close(c);

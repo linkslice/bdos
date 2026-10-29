@@ -1,0 +1,29 @@
+NET - the bdos machines on the network
+
+SYNOPSIS
+     NET
+     NET VIEW
+     NET USE [x: \\HOST\C\DIR]
+     NET USE x: /D
+
+DESCRIPTION
+     bdos machines find each other on the local network by name, with no
+     setting up. HOSTNAME shows or sets this one's name.
+
+     NET says what this machine is called and its adapter. NET VIEW lists
+     the bdos machines that answer. NET USE x: \\HOST\C\DIR makes drive x:
+     a folder on another machine; NET USE lists those drives, and
+     NET USE x: /D lets one go.
+
+     Across a router, or from a PC, bterm is the way in (MAN BTERM). TCP/IP
+     is there too: IPCONFIG, PING, TELNET, FETCH, NSLOOKUP, NTP.
+
+     CONTROL net.password=word makes other machines and bterm give the
+     password. There's no encryption, so keep it to networks you trust.
+
+EXAMPLES
+     NET VIEW
+     NET USE G: \\OFFICE\C\GAMES
+
+SEE ALSO
+     MAN CPU, MAN CTTY, MAN WIN, MAN BTERM, IPCONFIG

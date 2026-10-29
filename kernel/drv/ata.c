@@ -16,7 +16,7 @@ struct ata {
 
 static int ata_wait(struct ata *a, int want_drq)
 {
-	uint64_t until = uptime_ms() + 5000;
+	uint64_t until = uptime_ms() + BLK_TIMEOUT_MS;
 	for (;;) {
 		uint8_t st = inb(a->io + 7);
 		if (st == 0xFF)
@@ -28,7 +28,7 @@ static int ata_wait(struct ata *a, int want_drq)
 				return 0;
 		}
 		if (uptime_ms() > until)
-			return -1;
+			return blk_timeout();
 		cpu_pause();
 	}
 }

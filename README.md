@@ -7,7 +7,7 @@ desktops nest inside windows, and `WIN \\HOST` puts another machine's desktop
 in a window, with your own folder mounted on its `T:` drive.
 
 ```
-bdos 0.13 (x86-64) - Bryan Disk Operating System
+bdos 0.14 (x86-64) - Bryan Disk Operating System
 255,848 K memory, 1024x768 display, mouse
 
 Network: e1000 52:54:00:12:34:56, this machine is \\BDOS-123456
@@ -104,6 +104,12 @@ the memory map and RSDP, and exits boot services. It passes a
   parsing.
 
 `EDIT` is a full-screen editor; F5 runs the file you're editing.
+
+`MAN` is the manual: `MAN AFTERBOOT` walks through the first things to do
+after bdos boots (OpenBSD's afterboot(8) was the model), and there are pages
+for the disk commands, the CD drives, the network, sound and the keys bdos
+keeps for itself. They're text files in `C:\BDOS\MAN`; `MAN /K word`
+searches them.
 
 **BASIC.** BBC BASIC style:
 - Real numbers, `PROC`/`FN` with `LOCAL`, `REPEAT`/`UNTIL` and block `IF`.
@@ -228,6 +234,24 @@ streams, the DOS boxes' Sound Blasters, OPL2s and PC speakers all play at once.
   and `AUDIO$` (raw 48 kHz stereo) are there for batch files.
   `CONTROL sound.remote=0` keeps every remote session silent.
 
+**CD drives.** ISO 9660 images, with Joliet's long names, as read-only
+drives.
+- `MOUNT D: GAME.ISO` makes one; `MOUNT E: CD1.ISO,CD2.ISO,CD3.ISO` makes a
+  drive with a changer holding all three, for games on several discs. The
+  images can be anywhere: C:, a bterm's T:, a `NET USE` drive.
+- `bterm -d cd1.iso,cd2.iso -d other.iso host` brings CD images from the
+  bterm computer: each `-d` is a drive (the first free letter from D:), read
+  across the network as it's used. They're that session's alone, like its T:.
+- `DISC` lists the drives and their discs; `DISC D: 2`, `DISC D: NEXT`,
+  `DISC D: EJECT`, `DISC D: ADD CD4.ISO`.
+- **Ctrl+Alt+D** in a DOS game pauses it and puts the changer over its
+  screen: pick a disc, Enter, and the game carries on with the new one (a
+  line at the top says which). On the desktop the same key opens the Disc
+  Changer applet (Control Panel, and Accessories).
+- DOS programs find the drives through MSCDEX, built in: the drive list,
+  volume descriptors, raw sector reads and device requests (media changed
+  included), so games that insist on their CD are satisfied.
+
 **Networking (BDNET).** A small LAN protocol carried directly on Ethernet,
 in the spirit of NetBEUI, with an e1000 driver.
 - `NET VIEW` finds the other machines on the network.
@@ -253,7 +277,8 @@ in the spirit of NetBEUI, with an e1000 driver.
   `bterm -t host` opens its screen in a window, as if you were at it -- the
   C:\> prompt, DOS games full screen, `WIN` for the desktop, `EXIT` to close
   it; and `bterm -c host` gives you the prompt in your terminal. Either way,
-  the directory you started from is `T:` on the bdos side.
+  the directory you started from is `T:` on the bdos side, and `-d game.iso`
+  adds a CD drive.
   bterm draws the desktop itself, the way drawterm does: bdos sends what it
   draws (fills, text, icons, copies between windows' surfaces) and bterm
   runs the same drawing code on its own copies, so a window drag costs a
@@ -289,6 +314,11 @@ docs/                   PORTING-YEELOONG.md
 ```
 
 ## Known limits
+
+- A disk that doesn't answer a request for 30 seconds is taken offline
+  until the next restart (bdos says so), rather than risk it finishing the
+  request later into memory that's been reused. Disk I/O waits by polling,
+  under the big kernel lock.
 
 - USB: no hubs yet (plug keyboards into the machine itself), and only HID
   devices. HD Audio plays but doesn't record.

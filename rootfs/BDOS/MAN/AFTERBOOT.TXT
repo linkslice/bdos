@@ -1,0 +1,90 @@
+AFTERBOOT - things to check after bdos first starts
+
+DESCRIPTION
+     You've booted bdos and you're at C:\>. This page walks through the
+     first things worth doing, in the spirit of OpenBSD's afterboot(8).
+     None of it is required; all of it is quick. MAN on its own lists the
+     other pages, and HELP lists every command on a line each.
+
+   Where am I?
+     VER says which bdos this is. DRIVES lists the drive letters: C: is
+     where bdos lives. HWINFO shows the hardware it found, and FDISK the
+     disks. If you booted the CD, C: is a RAM disk and nothing you change
+     survives a restart - see "Putting bdos on a disk" below.
+
+   The clock
+     bdos keeps local time. To set it from the internet:
+
+           CONTROL clock.tz=-6         hours from UTC (-6 is Chicago)
+           CONTROL clock.dst=us        daylight saving: us, eu or none
+           CONTROL net.ntp=pool.ntp.org
+           NTP                         set it now
+
+     Or by hand: DATE 2026-10-19 and TIME 19:05.
+
+   The network
+     bdos asks for an address by DHCP when it starts. IPCONFIG shows what
+     it got; PING 10.0.2.2 (under QEMU) or your router checks it works.
+     For a fixed address: CONTROL net.ip=192.168.1.50 (and net.mask,
+     net.gateway, net.dns).
+
+     Give the machine a name you'll recognise, since that's how other
+     machines and bterm find it:
+
+           HOSTNAME OFFICE
+
+     Anyone on your network can connect with bterm unless you set a
+     password: CONTROL net.password=something. CONTROL net.udp=0 turns
+     bterm access off altogether. See MAN NET and MAN BTERM.
+
+   Putting bdos on a disk
+     From the CD, INSTALL lists the disks; INSTALL n puts bdos on disk n
+     (erasing it) and makes it bootable. On the desktop, Install bdos in
+     Program Manager does the same with a window. MAN INSTALL has the
+     details, including /UPGRADE, which keeps your files.
+
+   If a disk didn't mount
+     At boot, bdos says so when a bdos partition can't be mounted, and
+     DRIVES lists it with the reason. A partition that never got a drive
+     letter can't be checked with CHKDSK (which checks mounted drives).
+     The usual cause is a machine that stopped part way through INSTALL:
+     install again. FORMAT n makes that partition empty and usable without
+     touching the rest of the disk. See MAN CHKDSK and MAN FORMAT.
+
+     If a disk stops answering for 30 seconds while bdos is running (a
+     VM host's storage gone away, a failing drive), bdos says so and stops
+     using it until the next restart rather than risk writing garbage.
+
+   The desktop
+     WIN starts it; Alt+X leaves it. To start it at every boot, use the
+     Desktop applet in the Control Panel, or take the REM off the WIN line
+     in C:\AUTOEXEC.BAT (EDIT C:\AUTOEXEC.BAT). F1 in Program Manager is
+     the Help, which has more than these pages about the desktop.
+
+   Settings
+     CONTROL lists every setting with a line about each; CONTROL key=value
+     changes one, and it's saved straight away in C:\BDOS\SETTINGS.INI. On
+     the desktop, CONTROL opens the Control Panel. See MAN CONTROL.
+
+   Sound
+     SOUND says where this session's sound goes. A machine with no sound
+     card is fine: a bterm session's sound plays on the bterm's computer.
+     See MAN SOUND.
+
+   DOS programs and games
+     Copy them anywhere and run them by name. Ctrl+Alt+Del ends one. A game
+     on CD? MOUNT D: GAME.ISO, and Ctrl+Alt+D changes discs in the middle
+     of it. MAN KEYS has the keys DOS programs have; MAN MOUNT and MAN DISC
+     have the CDs.
+
+   From another computer
+     bterm (for Linux and macOS) shows this machine's desktop, its screen
+     or its prompt on another computer, with that computer's folder as T:
+     and its CD images as D:. MAN BTERM.
+
+   Writing programs
+     BASIC, TCC (C), EDIT. C:\Docs has the guides, and HELP SYS lists the
+     calls programs can make.
+
+SEE ALSO
+     HELP, DRIVES, CONTROL, MAN BTERM, MAN INSTALL, MAN KEYS, C:\Docs

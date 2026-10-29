@@ -69,7 +69,7 @@ try:
 
         pump(3)
         assert b"Connected to" in out, out
-        run("ver", "bdos version 0.13")
+        run("ver", "bdos version 0.14")
         run("dir T:", "Mine.txt")
         run("type t:\\mine.txt", "this file lives on the host")         # any case
         run('type "T:\\sub dir\\deep.txt"', "deep down")
@@ -85,6 +85,58 @@ try:
         assert os.path.isdir(os.path.join(SHARE, "newdir"))
         assert b"connection closed" in out, out[-300:]
     check("bterm -c: a shell, T: both ways", text_session)
+
+    def cd_session():
+        # bterm -d: two discs in one changer at D:, another drive at E:
+        isos = os.path.join(tmp, "isos")
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "mktestiso.py"), isos], check=True)
+        d1, d2 = os.path.join(isos, "DISC1.ISO"), os.path.join(isos, "DISC2.ISO")
+        m, s = pty.openpty()
+        p = subprocess.Popen([BTERM, "-c", "-d", f"{d1},{d2}", "-d", d2, f"127.0.0.1:{PORT}"],
+                             stdin=s, stdout=s, stderr=s, cwd=SHARE)
+        os.close(s)
+        out = b""
+
+        def pump(secs):
+            nonlocal out
+            end = time.time() + secs
+            while time.time() < end:
+                r, _, _ = select.select([m], [], [], 0.1)
+                if r:
+                    try:
+                        out += os.read(m, 65536)
+                    except OSError:
+                        return
+
+        def run(cmd, want, secs=10):
+            start = len(out)
+            os.write(m, (cmd + "\r").encode())
+            end = time.time() + secs
+            while time.time() < end:
+                pump(0.2)
+                text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out[start:].decode(errors="replace"))
+                if re.search(want, text) and text.rstrip().endswith(">"):
+                    return text
+            raise AssertionError(f"{cmd!r}: wanted {want!r}, got:\n{out[start:].decode(errors='replace')}")
+
+        pump(3)
+        assert b"Connected to" in out, out
+        run("disc", r"(?s)D:.*DISC1\.ISO")
+        run("type D:\\readme.txt", "This is disc one")
+        run("vol E:", "BDOS_DISC2")
+        run("dir \"D:\\Game Data\"", "A Long File Name.txt")
+        run("disc D: 2", "DISC2")
+        run("type D:\\readme.txt", "This is disc two")
+        run("copy \"D:\\Game Data\\A Long File Name.txt\" T:\\long.txt", "1 file")
+        run("disc D: eject", r"\(empty\)")
+        run("dir D:", "Not ready")
+        os.write(m, b"exit\r")
+        pump(2)
+        p.wait(timeout=10)
+        assert os.path.getsize(os.path.join(SHARE, "long.txt")) == 72000
+        # the session's drives were its own: the machine's console never had them
+        assert "BDOS_DISC" not in vm.cmd("vol E:")
+    check("bterm -d: CD images in a changer", cd_session)
 
     def desktop():
         snap = os.path.join(tmp, "desk.ppm")

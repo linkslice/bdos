@@ -25,6 +25,7 @@ const char *vfs_strerror(int err)
 	case E_NOHOST: return "Unknown host";
 	case E_NONET: return "No network (try IPCONFIG)";
 	case E_NOTSUP: return "Not supported on this drive";
+	case E_NOTREADY: return "Not ready: there's no disc in the drive (DISC to put one in)";
 	case E_XDEV: return "Cannot move between drives (use COPY)";
 	}
 	return bfs_strerror(err);
@@ -139,9 +140,48 @@ const char *vfs_subst_target(char letter)
 	return subst_of(letter) ? subst_to[toupper(letter) - 'A'] : NULL;
 }
 
+/*
+ * A remote session's own drives (bterm's CDs, what it MOUNTs): only the
+ * tasks in that session see them, as with its T:. NULL takes one away.
+ */
+struct sdrives {
+	struct vfs_drive *d[26];
+};
+
+void *vfs_session_new(void)
+{
+	return kzalloc(sizeof(struct sdrives));
+}
+
+void vfs_session_free(void *s)
+{
+	kfree(s);
+}
+
+int vfs_session_mount(char letter, struct vfs_drive *d)
+{
+	struct task *t = task_current();
+	letter = (char)toupper(letter);
+	if (letter < 'A' || letter > 'Z' || !t || !t->sdrives)
+		return E_BADDRIVE;
+	((struct sdrives *)t->sdrives)->d[letter - 'A'] = d;
+	return 0;
+}
+
+static struct vfs_drive *session_drive(char letter)
+{
+	struct task *t = task_current();
+	if (!t || !t->sdrives || letter < 'A' || letter > 'Z')
+		return NULL;
+	return ((struct sdrives *)t->sdrives)->d[letter - 'A'];
+}
+
 struct vfs_drive *vfs_drive(char letter)
 {
 	letter = (char)toupper(letter);
+	struct vfs_drive *sd = session_drive(letter);
+	if (sd)
+		return sd;
 	if (subst_of(letter)) {
 		const char *to = subst_to[letter - 'A'];
 		struct vfs_drive *real = vfs_drive(to[0]);
@@ -168,6 +208,8 @@ void vfs_drives(void (*cb)(struct vfs_drive *d, void *arg), void *arg)
 	for (int i = 0; i < 26; i++) {
 		if (i == 'T' - 'A' && t && t->tdrive)
 			cb(t->tdrive, arg);
+		else if (session_drive((char)('A' + i)))
+			cb(session_drive((char)('A' + i)), arg);
 		else if (drives[i].ops)
 			cb(&drives[i], arg);
 		else if (subst_to[i][0] && vfs_drive((char)('A' + i)))
@@ -905,6 +947,25 @@ static const struct vfs_ops bdosfs_ops = {
 	.set_label = bv_label,
 };
 
+/* bdos partitions that wouldn't mount at boot, and why: DRIVES lists them */
+static char unmounted[4][96];
+static int nunmounted;
+
+const char *vfs_unmounted(int i)
+{
+	return i >= 0 && i < nunmounted ? unmounted[i] : NULL;
+}
+
+static const char *mount_failure(int r)
+{
+	switch (r) {
+	case BFS_ECORRUPT: return "it isn't a whole bdosfs filesystem (no good superblock, or the journal is bad)";
+	case BFS_EIO: return "the disk wouldn't read it";
+	case BFS_ENOMEM: return "out of memory";
+	}
+	return bfs_strerror(r);
+}
+
 static int mount_bdosfs(char letter, struct blkdev *b, uint64_t start, uint64_t sectors,
     const char *what)
 {
@@ -920,7 +981,10 @@ static int mount_bdosfs(char letter, struct blkdev *b, uint64_t start, uint64_t 
 	v->dev.nblocks = sectors / 8;
 	int r = bfs_mount(&v->dev, &v->fs);
 	if (r) {
-		kprintf("%s: %s\n", what, bfs_strerror(r));
+		/* CHKDSK checks drives, and this one hasn't a letter: say what can be done */
+		kprintf("%s can't be mounted: %s.\n", what, mount_failure(r));
+		if (nunmounted < (int)NELEM(unmounted))
+			snprintf(unmounted[nunmounted++], sizeof unmounted[0], "%s: not mounted: %s", what, mount_failure(r));
 		kfree(v);
 		return r;
 	}
@@ -1057,6 +1121,11 @@ void storage_init(void)
 		if (rd && !mount_bdosfs('C', rd, 0, rd->sectors, "RAM disk (from ROOTFS.IMG)"))
 			next++;
 	}
-	if (next == 'C')
-		kprintf("No bdosfs disk found. Drive C: is not available.\n");
+	if (nunmounted)
+		kprintf("CHKDSK can only check a mounted drive, so it can't help with that one.\n"
+		    "If the machine stopped while bdos was being installed, INSTALL again. FORMAT n\n"
+		    "wipes just that partition and makes it usable (FDISK lists the disks). MAN AFTERBOOT has more.\n");
+	if (next == 'C' && !nunmounted)
+		kprintf("No bdos disk found, so there's no C:. Boot the bdos CD and INSTALL onto a disk\n"
+		    "(FDISK lists the disks this machine has; none means the disk controller isn't one bdos knows).\n");
 }

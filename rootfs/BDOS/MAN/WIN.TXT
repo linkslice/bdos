@@ -1,0 +1,28 @@
+WIN - the desktop
+
+SYNOPSIS
+     WIN
+     WIN \\HOST
+
+DESCRIPTION
+     WIN starts the desktop: Program Manager, File Manager, shells in
+     windows, DOS programs in windows, the Control Panel. Alt+X leaves it
+     (or File > Exit Desktop).
+
+     WIN \\HOST shows another bdos machine's desktop here, as bterm does
+     from another computer: your session on it, with this machine's
+     current directory as its T:.
+
+     A WIN in a shell window on the desktop is a desktop in a window.
+
+     To start the desktop at boot: the Desktop applet in the Control
+     Panel, or the WIN line in C:\AUTOEXEC.BAT.
+
+   Keys
+     Alt+N       a new shell            Alt+W      the next window
+     Alt+Q       close the window       Alt+X      leave the desktop
+     Alt+Space   the window menu        Ctrl+Esc   the Task Manager
+     Ctrl+Alt+D  the Disc Changer       F1         Help (Program Manager)
+
+SEE ALSO
+     F1 on the desktop, C:\Docs\Desktop.txt, MAN KEYS, MAN BTERM

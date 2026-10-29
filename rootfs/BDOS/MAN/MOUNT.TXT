@@ -1,0 +1,35 @@
+MOUNT - CD images as drives
+
+SYNOPSIS
+     MOUNT
+     MOUNT d: image.iso[,image2.iso...]
+     MOUNT d:
+     MOUNT d: /D
+
+DESCRIPTION
+     MOUNT d: image.iso makes drive d: a CD drive with that ISO 9660 image
+     in it. Long names (Joliet) work, as do the 8.3 names DOS programs use.
+     A CD drive is read-only. The image can be anywhere bdos can read: C:,
+     T: (on the bterm computer), a NET USE drive.
+
+     Give several images, with commas between them, and the drive has a
+     changer with all of them in it: the first is in the drive, and DISC
+     (or Ctrl+Alt+D in a game) changes it. That's for games on more than
+     one CD.
+
+     MOUNT on its own lists the CD drives and their discs; MOUNT d: shows
+     one. MOUNT d: /D takes the drive away.
+
+     DOS programs find the drives the way they find real ones, through
+     MSCDEX (it's built in), so games that insist on a CD are happy.
+
+     A MOUNT in a bterm session belongs to that session, like its T:. The
+     machine's own MOUNTs are everyone's.
+
+EXAMPLES
+     MOUNT D: C:\GAMES\DOOM2.ISO
+     MOUNT E: T:\CD1.ISO,T:\CD2.ISO,T:\CD3.ISO
+     MOUNT D: /D
+
+SEE ALSO
+     MAN DISC, MAN BTERM (bterm -d), DRIVES

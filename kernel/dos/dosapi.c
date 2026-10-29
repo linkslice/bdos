@@ -11,6 +11,7 @@
  */
 #include "dos.h"
 #include "../gate.h"
+#include "../cdrom.h"
 
 #define PSP_SIZE_PARAS	0x10
 #define JFT_SIZE	20
@@ -20,6 +21,7 @@
 #define XMS_BASE	0x110000	/* extended memory past the HMA */
 
 static void dos_err(struct dosbox *b, int code);
+static struct changer *cd_drive(int d);
 
 /* ---- small things ------------------------------------------------------------------ */
 
@@ -44,6 +46,7 @@ static uint16_t dos_error_code(int e)
 	case E_NOSPC: return 0x27;
 	case E_BADDRIVE: return 0x0F;
 	case E_INVAL: return 0x0D;
+	case E_NOTREADY: return 0x15;	/* drive not ready */
 	}
 	return 0x1F;
 }
@@ -2225,8 +2228,11 @@ static int int21(struct dosbox *b)
 		}
 			ok(c);
 			break;
-		case 0x09:
-			set16(c, R_EDX, 0);
+		case 0x09:		/* remote? CD drives say so, which is how programs tell them */
+		{
+			int d = BL(c) ? BL(c) - 1 : b->drive;
+			set16(c, R_EDX, cd_drive(d) ? 0x1000 : 0);
+		}
 			ok(c);
 			break;
 		case 0x0A:
@@ -2483,9 +2489,270 @@ static int int21(struct dosbox *b)
 	return 0;
 }
 
+/* ---- MSCDEX: the CD drives, as DOS programs expect to find them ------------------------- */
+
+static void put_bytes(struct dosbox *b, uint32_t a, const void *src, size_t n)
+{
+	struct x86 *c = &b->cpu;
+	const uint8_t *p = src;
+	if ((uint64_t)a + n <= c->mem_size && ((a + n - 1) & c->a20) == a + n - 1) {
+		memcpy(c->mem + a, p, n);
+		return;
+	}
+	for (size_t i = 0; i < n; i++)
+		mbw(b, a + (uint32_t)i, p[i]);
+}
+
+/* (the CD code is the kernel's: it's called with the big lock, which nests) */
+static struct changer *cd_drive(int d)
+{
+	if (d < 0 || d >= 26)
+		return NULL;
+	bkl_enter();
+	struct changer *ch = changer_at((char)('A' + d));
+	bkl_leave();
+	return ch;
+}
+
+/* read n sectors from lba into the guest: 0, or a DOS error */
+static int cd_read_to(struct dosbox *b, struct changer *ch, uint32_t lba, uint32_t n, uint32_t lin)
+{
+	uint8_t *buf = kmalloc(16 * CD_SECTOR);
+	if (!buf)
+		return 8;
+	int err = 0;
+	while (n && !err) {
+		uint32_t k = MIN(n, 16u);
+		int r = changer_read_sectors(ch, lba, k, buf);
+		if (r) {
+			err = r == E_NOTREADY ? 0x15 : 0x1F;
+			break;
+		}
+		put_bytes(b, lin, buf, (size_t)k * CD_SECTOR);
+		lin += k * CD_SECTOR;
+		lba += k;
+		n -= k;
+	}
+	kfree(buf);
+	return err;
+}
+
+/* has the disc changed since this program last asked? 1 no, -1 yes */
+static int cd_changed(struct dosbox *b, int d, struct changer *ch)
+{
+	uint32_t g = changer_generation(ch) + 1;
+	int r = b->cd_seen[d] == g ? 1 : -1;
+	if (!b->cd_seen[d])
+		r = 0;		/* never asked: don't know */
+	b->cd_seen[d] = g;
+	return r;
+}
+
+/* INT 2Fh 1510h: a request for the CD's device driver */
+static void cd_request(struct dosbox *b, int d, uint32_t rq)
+{
+	struct changer *ch = cd_drive(d);
+	uint8_t cmd = mb(b, rq + 2);
+	uint16_t status = 0x0100;			/* done */
+	int empty = !ch || changer_current(ch) < 0;
+	switch (cmd) {
+	case 3: {					/* IOCTL input */
+		uint32_t cb = sl(mw(b, rq + 16), mw(b, rq + 14));
+		switch (mb(b, cb)) {
+		case 0:					/* the device header */
+			mww(b, cb + 1, ROM_CD_DEV);
+			mww(b, cb + 3, BIOS_SEG);
+			break;
+		case 1:					/* where the head is */
+			mdw(b, cb + 2, 0);
+			break;
+		case 4:					/* audio channels: straight through */
+			for (int i = 0; i < 4; i++) {
+				mbw(b, cb + 1 + i * 2, (uint8_t)i);
+				mbw(b, cb + 2 + i * 2, 0xFF);
+			}
+			break;
+		case 6:					/* status: cooked and raw, data only, door unlocked */
+			mdw(b, cb + 1, 0x0006 | (empty ? 0x0800 : 0));
+			break;
+		case 7:					/* sector size */
+			mww(b, cb + 2, CD_SECTOR);
+			break;
+		case 8:					/* volume size, in sectors */
+			mdw(b, cb + 1, empty ? 0 : (uint32_t)(changer_size(ch) / CD_SECTOR));
+			break;
+		case 9:					/* media changed? */
+			mbw(b, cb + 1, (uint8_t)(empty ? 0 : cd_changed(b, d, ch)));
+			break;
+		case 10:				/* audio disc: one data track */
+			mbw(b, cb + 1, 1);
+			mbw(b, cb + 2, 1);
+			mdw(b, cb + 3, empty ? 0 : (uint32_t)(changer_size(ch) / CD_SECTOR + 150));
+			break;
+		case 11:				/* a track: 1, data, at 00:02:00 */
+			mdw(b, cb + 2, 0x00000200);
+			mbw(b, cb + 6, 0x40);
+			break;
+		case 12:				/* Q channel: nothing playing */
+			for (int i = 1; i < 11; i++)
+				mbw(b, cb + (uint32_t)i, 0);
+			break;
+		case 15:				/* audio status: not paused */
+			mww(b, cb + 1, 0);
+			mdw(b, cb + 3, 0);
+			mdw(b, cb + 7, 0);
+			break;
+		default:
+			status = 0x8103;		/* unknown command */
+		}
+		if (empty && status == 0x0100 && mb(b, cb) >= 8 && mb(b, cb) != 9)
+			status = 0x8102;		/* not ready */
+		break;
+	}
+	case 12: {					/* IOCTL output */
+		uint32_t cb = sl(mw(b, rq + 16), mw(b, rq + 14));
+		switch (mb(b, cb)) {
+		case 0:					/* eject */
+			if (ch)
+				changer_insert(ch, -1);
+			break;
+		case 1: case 2: case 3: case 4: case 5:	/* lock, reset, audio, close tray */
+			break;
+		default:
+			status = 0x8103;
+		}
+		break;
+	}
+	case 13: case 14:				/* open, close */
+		break;
+	case 128: {					/* read long */
+		if (empty) {
+			status = 0x8102;
+			break;
+		}
+		if (mb(b, rq + 13) != 0 || mb(b, rq + 24) != 0) {	/* HSG addresses, cooked */
+			status = 0x8103;
+			break;
+		}
+		uint32_t to = sl(mw(b, rq + 16), mw(b, rq + 14));
+		int e = cd_read_to(b, ch, md(b, rq + 20), mw(b, rq + 18), to);
+		if (e)
+			status = e == 0x15 ? 0x8102 : 0x810B;
+		break;
+	}
+	case 130:					/* seek */
+		break;
+	case 132: case 133: case 136:			/* play, stop, resume audio: there's none */
+		break;
+	default:
+		status = 0x8103;
+	}
+	mww(b, rq + 3, status);
+}
+
+/* AX = 15xxh, MSCDEX 2.23 */
+static int mscdex(struct dosbox *b)
+{
+	struct x86 *c = &b->cpu;
+	char letters[27];
+	int n = cd_letters(letters, sizeof letters);
+	uint32_t esbx = sl(c->s[S_ES].sel, BX(c));
+	switch (AX(c)) {
+	case 0x1500:					/* installed? how many, from where */
+		set16(c, R_EBX, (uint16_t)n);
+		if (n)
+			set16(c, R_ECX, (uint16_t)(letters[0] - 'A'));
+		return 1;
+	case 0x1501:					/* the drives' device headers */
+		for (int i = 0; i < n; i++) {
+			mbw(b, esbx + (uint32_t)i * 5, (uint8_t)i);
+			mww(b, esbx + (uint32_t)i * 5 + 1, ROM_CD_DEV);
+			mww(b, esbx + (uint32_t)i * 5 + 3, BIOS_SEG);
+		}
+		return 1;
+	case 0x1502: case 0x1503: case 0x1504: {	/* copyright, abstract, bibliography file names */
+		struct changer *ch = cd_drive(CX(c));
+		if (!ch) {
+			fail(b, 0x0F);
+			return 1;
+		}
+		mbw(b, esbx, 0);
+		ok(c);
+		return 1;
+	}
+	case 0x1505: {					/* the volume descriptors, one at a time */
+		struct changer *ch = cd_drive(CX(c));
+		if (!ch) {
+			fail(b, 0x0F);
+			return 1;
+		}
+		int e = cd_read_to(b, ch, 16u + DX(c), 1, esbx);
+		if (e) {
+			fail(b, (uint16_t)e);
+			return 1;
+		}
+		uint8_t t = mb(b, esbx);
+		set16(c, R_EAX, t == 0xFF ? 0xFF : t);
+		ok(c);
+		return 1;
+	}
+	case 0x1508: {					/* absolute read: SI:DI from, DX sectors */
+		struct changer *ch = cd_drive(CX(c));
+		if (!ch) {
+			fail(b, 0x0F);
+			return 1;
+		}
+		int e = cd_read_to(b, ch, (uint32_t)SI(c) << 16 | DI(c), DX(c), esbx);
+		if (e) {
+			fail(b, (uint16_t)e);
+			return 1;
+		}
+		ok(c);
+		return 1;
+	}
+	case 0x1509:					/* absolute write: it's a CD */
+		fail(b, 0x13);
+		return 1;
+	case 0x150B:					/* is CX a CD drive? */
+		set16(c, R_EAX, cd_drive(CX(c)) ? 0x5AD8 : 0);
+		set16(c, R_EBX, 0xADAD);
+		return 1;
+	case 0x150C:					/* version */
+		set16(c, R_EBX, 0x0217);
+		return 1;
+	case 0x150D:					/* the CD drives' letters */
+		for (int i = 0; i < n; i++)
+			mbw(b, esbx + (uint32_t)i, (uint8_t)(letters[i] - 'A'));
+		return 1;
+	case 0x150E:					/* preferences: fine */
+		ok(c);
+		return 1;
+	case 0x1510:					/* a device request */
+		if (!cd_drive(CX(c))) {
+			fail(b, 0x0F);
+			return 1;
+		}
+		cd_request(b, CX(c), esbx);
+		ok(c);
+		return 1;
+	}
+	if (AH(c) == 0x15) {
+		fail(b, 1);
+		return 1;
+	}
+	return 0;
+}
+
 void dos_int2f(struct dosbox *b)
 {
 	struct x86 *c = &b->cpu;
+	if (AH(c) == 0x15) {
+		bkl_enter();
+		int done = mscdex(b);
+		bkl_leave();
+		if (done)
+			return;
+	}
 	switch (AX(c)) {
 	case 0x1600:		/* Windows: not here */
 		setlo(c, R_EAX, 0);

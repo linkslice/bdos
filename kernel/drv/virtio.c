@@ -235,11 +235,11 @@ static int vblk_req(struct vblk *b, uint32_t type, uint64_t sector, uint32_t cou
 	d[n - 1].next = (uint16_t)n;
 	d[n] = (struct vdesc){ (uint64_t)(b->hdr + 16), 1, D_WRITE, 0 };
 	vq_push(&b->q, 0);
-	uint64_t until = uptime_ms() + 10000;
+	uint64_t until = uptime_ms() + BLK_TIMEOUT_MS;
 	int id;
 	while ((id = vq_pop(&b->q, NULL)) < 0) {
 		if (uptime_ms() > until)
-			return -1;
+			return blk_timeout();
 		cpu_pause();
 	}
 	return b->hdr[16] == 0 ? 0 : -1;
@@ -345,6 +345,8 @@ struct vscsi_disk {
 static int vscsi_cmd(struct vscsi_hba *h, int target, int lun, const uint8_t *cdb, int cdblen,
     uint32_t len, int dir_in, int *key)
 {
+	if (key)
+		*key = -1;	/* (a timeout has no sense, and isn't tried again) */
 	memset(h->req, 0, 51);
 	h->req[0] = 1;
 	h->req[1] = (uint8_t)target;
@@ -366,10 +368,10 @@ static int vscsi_cmd(struct vscsi_hba *h, int target, int lun, const uint8_t *cd
 		d[1] = (struct vdesc){ (uint64_t)h->resp, 12 + SCSI_SENSE, D_WRITE, 0 };
 	}
 	vq_push(&h->q, 0);
-	uint64_t until = uptime_ms() + 10000;
+	uint64_t until = uptime_ms() + BLK_TIMEOUT_MS;
 	while (vq_pop(&h->q, NULL) < 0) {
 		if (uptime_ms() > until)
-			return -1;
+			return blk_timeout();
 		cpu_pause();
 	}
 	if (key)

@@ -1,0 +1,34 @@
+CONTROL - settings, and the Control Panel
+
+SYNOPSIS
+     CONTROL [LIST]
+     CONTROL key=value
+     CONTROL applet                 (on the desktop)
+
+DESCRIPTION
+     bdos keeps its settings in C:\BDOS\SETTINGS.INI, a key=value a line.
+     CONTROL lists them all with a line about each; CONTROL key=value
+     changes one. Changes take effect at once and are saved.
+
+     On the desktop, CONTROL opens the Control Panel, and CONTROL applet
+     opens one applet: DATE, NETWORK, DESKTOP, THEMES, MOUSE, KEYBOARD,
+     DOS, SOUND, DISCS (the Disc Changer) or SYSTEM. CONTROL LIST lists
+     the settings there too.
+
+   Some to know
+     clock.tz, clock.dst, net.ntp   the clock (MAN AFTERBOOT)
+     net.ip, net.mask, net.gateway  a fixed address (default: dhcp)
+     net.password                   what bterm must give
+     net.udp                        0: no bterm at all
+     net.cpu                        the machine CPU uses (MAN CPU)
+     dos.speed                      xt, at, 386, 486, pentium or max
+     dos.scale                      sharp, smooth or stretch
+     sound.remote                   0: bterm sessions are silent
+     desktop.theme                  Hot Dog Stand, for one
+
+EXAMPLES
+     CONTROL dos.speed=386
+     CONTROL desktop.theme=Hot Dog Stand
+
+SEE ALSO
+     C:\Docs\Settings.txt, MAN AFTERBOOT

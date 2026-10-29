@@ -1,0 +1,40 @@
+CHKDSK - check a drive, and fix what's wrong
+
+SYNOPSIS
+     CHKDSK [d:] [/F]
+
+DESCRIPTION
+     CHKDSK reads every directory and file on a bdosfs drive and checks
+     that they agree with each other: that every block in use belongs to
+     exactly one file, that the free-space map says so, and that every file
+     and directory is reachable and intact. It then shows the drive's size
+     and free space.
+
+     Without /F it only reports. With /F it fixes what it can: blocks
+     marked used that nothing uses are freed, and so on.
+
+     It checks the current drive unless you name one.
+
+     bdosfs keeps a journal, so a machine switched off in the middle of
+     writing comes back consistent: at boot the journal is replayed and
+     bdos says so ("journal replayed"). CHKDSK is for when something worse
+     has happened.
+
+LIMITS
+     CHKDSK works on mounted drives - ones with a letter. A bdos partition
+     so damaged that it couldn't be mounted at boot has no letter, so
+     CHKDSK can't reach it. bdos says so at boot, and DRIVES lists it with
+     the reason. What you can do then:
+
+       - If it happened during INSTALL, install again (MAN INSTALL).
+       - FORMAT n empties that partition and makes it usable (MAN FORMAT).
+         Its files are lost.
+
+     CD drives and T: aren't bdosfs; CHKDSK has nothing to check there.
+
+EXAMPLES
+     CHKDSK              check C: (or wherever you are)
+     CHKDSK D: /F        check D: and fix it
+
+SEE ALSO
+     MAN FORMAT, MAN FDISK, MAN AFTERBOOT, DRIVES

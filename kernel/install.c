@@ -181,6 +181,9 @@ static int copy_file(struct copy *c, const char *src, const char *dst, uint64_t 
 	(void)mtime;
 	if (!err && attr)
 		vfs_setattr(dst, attr);
+	/* between files, with nothing half-done: let everything else have a turn
+	 * (the desktop redraws, the network answers) */
+	task_yield();
 	return err;
 }
 

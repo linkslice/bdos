@@ -327,6 +327,7 @@ static void frame(struct dosbox *b)
 			struct rect area = { 0, 0, d->surf->w, d->surf->h };
 			vga_render(b, d->surf, area);
 			mouse_draw(b, d->surf, area);
+			disc_banner_draw(b, d->surf);
 			show_changes(b, d);
 		}
 		display_unlock(d);
@@ -338,8 +339,10 @@ static void frame(struct dosbox *b)
 		b->cpu.vram_touched = 0;
 		dosbox_screen_mode(b);
 	}
-	if (b->text_live && vga_is_text(b))
+	if (b->text_live && vga_is_text(b)) {
 		text_sync(b);
+		disc_banner_text(b);
+	}
 	b->vga.dirty = 0;
 }
 
@@ -466,7 +469,10 @@ static void raw_key(struct dosbox *b, uint8_t sc)
 		else
 			state_key(b, sc == 0x58);
 		return;
-	} else if (b->raw_ctrl && b->raw_alt && (sc == 0xD3 || sc == 0xD7 || sc == 0xD8)) {
+	} else if (b->raw_ctrl && b->raw_alt && sc == 0x20) {
+		b->disc_req = 1;	/* Ctrl+Alt+D: the CD changer */
+		return;
+	} else if (b->raw_ctrl && b->raw_alt && (sc == 0xD3 || sc == 0xD7 || sc == 0xD8 || sc == 0xA0)) {
 		return;		/* their releases */
 	}
 	kbd_push(b, sc);
@@ -485,6 +491,20 @@ static int cooked_special(struct dosbox *b, int k)
 			b->dump_req = 1;
 			return 1;
 		}
+	}
+	if (k == (KEY_ALT | 4)) {	/* Ctrl+Alt+D, as a terminal sends it (ESC ^D) */
+		b->disc_req = 1;
+		return 1;
+	}
+	if (k == 4 || k == (KEY_ALT | 'd') || k == (KEY_ALT | 'D')) {
+		bkl_enter();
+		int mods = input_mods();
+		bkl_leave();
+		if ((mods & 6) == 6) {
+			b->disc_req = 1;
+			return 1;
+		}
+		return 0;
 	}
 	if (k != KEY_F1 + 10 && k != KEY_F1 + 11)
 		return 0;
@@ -681,6 +701,11 @@ static void run(struct dosbox *b)
 				kprintf(" %02X%02X%02X", v->dac[i][0], v->dac[i][1], v->dac[i][2]);
 			kprintf("\n");
 			dosbox_crash_dump(b, b->cpu.s[S_CS].sel, b->cpu.eip);
+		}
+		if (b->disc_req) {
+			b->disc_req = 0;
+			disc_menu(b);
+			continue;
 		}
 		if (b->state_req) {
 			int load = b->state_req == 2;
@@ -949,9 +974,12 @@ static int dosbox_run(const char *path, int argc, char **argv, const char *state
  * parallel with everything else. Kernel calls go through gate.h. */
 int com_run(const char *path, int argc, char **argv)
 {
+	struct task *me = task_current();
+	me->in_dos++;
 	int held = bkl_release_all();
 	int r = dosbox_run(path, argc, argv, NULL);
 	bkl_reacquire(held);
+	me->in_dos--;
 	return r;
 }
 
@@ -966,7 +994,10 @@ int com_resume(const char *name)
 	int held = bkl_release_all();
 	char prog[VFS_PATH_MAX];
 	snprintf(prog, sizeof prog, "%s", name);
+	struct task *me = task_current();
+	me->in_dos++;
 	int r = dosbox_run(prog, 0, NULL, file);
 	bkl_reacquire(held);
+	me->in_dos--;
 	return r;
 }

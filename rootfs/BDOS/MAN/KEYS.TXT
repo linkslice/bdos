@@ -1,0 +1,32 @@
+KEYS - the keys bdos keeps for itself
+
+DESCRIPTION
+   In a DOS program
+     Ctrl+Alt+D      change the CD: the program pauses and the Disc Changer
+                     shows over its screen (MAN DISC)
+     Ctrl+Alt+Del    end the program, back to the prompt
+     Ctrl+Alt+F11    freeze it to a state file in C:\BDOS\STATES
+     Ctrl+Alt+F12    go back to that state (RESUME NAME, later, does too)
+     Ctrl+Alt+F10    what the screen is doing, with CONTROL dos.trace=1
+     Ctrl+Alt        give the mouse back, when a game in a window has it
+
+     Everything else goes to the program, as a real keyboard's key presses
+     and releases. Keyboards without an Insert or Print Screen key (a
+     Keychron, a laptop) have all of these.
+
+   At the prompt
+     Up, Down        the commands you typed before
+     Tab             complete a file name
+     Esc             clear the line
+     Ctrl+C          forget the line; stop a long listing
+     Ctrl+Z          end of input (COPY CON FILE.TXT, then Ctrl+Z)
+
+   On the desktop
+     Alt+N, Alt+W, Alt+Q, Alt+X, Alt+Space, Ctrl+Esc, F1: MAN WIN.
+     Ctrl+Alt+D opens the Disc Changer when no DOS program has the keys.
+
+   In bterm
+     The same keys, sent as they are. Ctrl-] hangs up bterm -c.
+
+SEE ALSO
+     MAN DISC, MAN WIN, MAN BTERM

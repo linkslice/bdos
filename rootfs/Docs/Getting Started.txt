@@ -16,6 +16,9 @@ HELP lists the commands. A few to start with:
   BASIC, TCC                        write programs
   FDISK, FORMAT, INSTALL            disks, and putting bdos on one
   NTP                               set the clock from the internet
+  MOUNT, DISC                       CD images as drives
+  MAN AFTERBOOT                     the manual, starting with what to
+                                    do first (MAN lists the pages)
 
 The desktop
 -----------

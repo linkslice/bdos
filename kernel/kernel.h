@@ -11,7 +11,7 @@
 
 #define BDOS_NAME	"bdos"
 #define BDOS_LONGNAME	"Bryan Disk Operating System"
-#define BDOS_VERSION	"0.13"
+#define BDOS_VERSION	"0.14"
 
 #define NELEM(a)	(sizeof(a) / sizeof((a)[0]))
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
@@ -167,10 +167,12 @@ struct task {
 	void *user;			/* per-subsystem data (shell state) */
 	void *desk;			/* the desktop this task lives on, if any */
 	void *tdrive;			/* a session's T: drive (struct vfs_drive) */
+	void *sdrives;			/* a session's other drives (struct sdrives): its CDs */
 	int asess;			/* the audio session it sounds in (0: the console) */
 	void *proc;			/* the native program this is a thread of, if any */
 	uint64_t fs_base;		/* its thread-local storage */
 	char dos_speed[12];		/* DOS programs here run at this pace ("": as usual) */
+	volatile int in_dos;		/* a DOS program's running in it: its keys are the program's */
 };
 
 /* One per core. GS points at it; self must stay first. */

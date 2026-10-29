@@ -73,7 +73,7 @@ static int submit(struct nvme *c, struct queue *q, struct sqe *cmd, uint32_t *dw
 	q->sq_tail = (uint16_t)((q->sq_tail + 1) % QSIZE);
 	mmio_barrier();
 	*q->sq_db = q->sq_tail;
-	uint64_t until = uptime_ms() + (uint64_t)c->timeout_ms;
+	uint64_t until = uptime_ms() + (uint64_t)MAX(c->timeout_ms, BLK_TIMEOUT_MS);
 	for (;;) {
 		volatile struct cqe *e = &q->cq[q->cq_head];
 		if ((e->status & 1) == q->phase) {
@@ -87,7 +87,7 @@ static int submit(struct nvme *c, struct queue *q, struct sqe *cmd, uint32_t *dw
 			return st;
 		}
 		if (uptime_ms() > until)
-			return -1;
+			return blk_timeout();
 		cpu_pause();
 	}
 }

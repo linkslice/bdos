@@ -1,0 +1,24 @@
+FORMAT - make an empty bdosfs filesystem
+
+SYNOPSIS
+     FORMAT n [/Y]
+
+DESCRIPTION
+     FORMAT n writes a new, empty bdosfs filesystem in the bdosfs partition
+     on disk n (the number FDISK shows). Everything that was in that
+     partition is gone. It asks you to type YES first; /Y doesn't ask.
+
+     Only the bdosfs partition is touched: the EFI partition and anything
+     else on the disk stay as they were. So FORMAT is how to rescue a
+     partition that won't mount (bdos says so at boot) without
+     reinstalling. The new filesystem gets its drive letter the next time
+     bdos starts.
+
+     A disk with no bdosfs partition needs FDISK n /GPT first.
+
+EXAMPLES
+     FDISK               find the disk's number
+     FORMAT 1            empty disk 1's bdosfs partition
+
+SEE ALSO
+     MAN FDISK, MAN INSTALL, MAN CHKDSK, LABEL

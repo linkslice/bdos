@@ -31,6 +31,7 @@ enum {
 	E_BADDRIVE = -20, E_NOTSUP = -21, E_XDEV = -22,
 	E_BADF = -23, E_NFILE = -24, E_NOSYS = -25, E_TIMEDOUT = -26,
 	E_REFUSED = -27, E_RESET = -28, E_NOHOST = -29, E_NONET = -30,
+	E_NOTREADY = -31,	/* a CD drive with no disc in it */
 };
 
 struct vstat {
@@ -79,6 +80,10 @@ struct chardev {
 
 struct vfile;
 
+const char *vfs_unmounted(int i);		/* partitions that wouldn't mount, and why */
+void *vfs_session_new(void);			/* a session's own drives */
+void vfs_session_free(void *s);
+int vfs_session_mount(char letter, struct vfs_drive *d);	/* in the caller's session; NULL: away */
 int vfs_mount(char letter, const struct vfs_ops *ops, void *ctx, const char *desc);
 int vfs_unmount(char letter);
 /* SUBST X: target (NULL: undo it); what X: stands for, or NULL */

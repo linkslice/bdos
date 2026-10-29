@@ -239,6 +239,7 @@ struct dosbox {
 	const uint32_t *shadow_of;
 	int last_w, last_h;	/* the mode the display was last sized for */
 	int raw_ctrl, raw_alt;
+	int rcap;		/* the pointer's captured, on a whole display of our own (bterm -t) */
 	int state_req;		/* 1 save, 2 load, at the next chance */
 	/* XMS */
 	struct { int used; uint32_t base, size; int locks; } xms[MAX_EXT];

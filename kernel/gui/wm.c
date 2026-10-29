@@ -2989,6 +2989,10 @@ struct display *display_open(struct console *c, int *err)
 		screen_suspend(1);
 		return &sd->d;
 	}
+	extern int console_is_scon(struct console *c);
+	extern struct display *scon_take_display(struct console *c, int *err);
+	if (console_is_scon(c))		/* a bterm -t screen: the whole of it */
+		return scon_take_display(c, err);
 	if (console_is_termwin(c)) {
 		struct termwin *t = c->priv;
 		if (t->child || !t->win) {
@@ -3024,8 +3028,8 @@ struct display *display_open(struct console *c, int *err)
  * shrink to fit, within the screen; the full screen is what it is. */
 int display_want_size(struct display *d, int w, int h)
 {
-	if (!strcmp(d->name, "screen"))
-		return 0;
+	if (!strcmp(d->name, "screen") || !strcmp(d->name, "network"))
+		return 0;	/* it is what it is: the picture's fitted to it */
 	struct term_disp *td = (struct term_disp *)d;
 	struct termwin *t = td->t;
 	struct win *win = t->win;
@@ -3062,6 +3066,11 @@ int display_want_size(struct display *d, int w, int h)
 
 void display_close(struct display *d)
 {
+	if (!strcmp(d->name, "network")) {	/* a bterm -t screen: back to its text */
+		extern void scon_give_back(struct display *d);
+		scon_give_back(d);
+		return;
+	}
 	if (!strcmp(d->name, "screen")) {
 		struct screen_disp *sd = (struct screen_disp *)d;
 		screen_suspend(0);

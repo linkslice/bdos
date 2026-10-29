@@ -165,6 +165,8 @@ void dosbox_crash_dump(struct dosbox *b, uint16_t cs, uint32_t ip)
 	    c->s[S_DS].sel, c->s[S_ES].sel, c->s[S_SS].sel, c->s[S_FS].sel, c->s[S_GS].sel);
 }
 
+static void capture(struct dosbox *b, int on);
+
 /* graphics: show the VGA in a display, opening one if need be */
 void dosbox_set_graphics(struct dosbox *b, int on)
 {
@@ -189,6 +191,7 @@ void dosbox_set_graphics(struct dosbox *b, int on)
 		b->vga.dirty = 1;
 		b->last_w = b->last_h = 0;
 	} else if (!on && b->disp) {
+		capture(b, 0);
 		bkl_enter();
 		display_close(b->disp);
 		bkl_leave();
@@ -429,6 +432,23 @@ static void state_key(struct dosbox *b, int load)
 }
 
 /* raw make/break bytes: watch for our own keys, Ctrl+Alt+Del and the states */
+/*
+ * On a whole display of our own across the network (bterm -t), there's no
+ * desktop to capture the pointer for a game that turns with the mouse: we
+ * ask bterm ourselves, on a click, and let go on Ctrl+Alt or when the game
+ * stops wanting it.
+ */
+static void capture(struct dosbox *b, int on)
+{
+	struct display *d = b->disp;
+	if (on == b->rcap || !d || !d->pointer)
+		return;
+	b->rcap = on;
+	bkl_enter();
+	d->pointer(d, on ? PTR_CAPTURED : 0);
+	bkl_leave();
+}
+
 static void raw_key(struct dosbox *b, uint8_t sc)
 {
 	if (sc == 0x1D) b->raw_ctrl = 1;
@@ -450,6 +470,8 @@ static void raw_key(struct dosbox *b, uint8_t sc)
 		return;		/* their releases */
 	}
 	kbd_push(b, sc);
+	if (b->rcap && b->raw_ctrl && b->raw_alt)
+		capture(b, 0);		/* Ctrl+Alt: the pointer back */
 }
 
 /* cooked keys can't say Ctrl+Alt, so ask the keyboard what's held */
@@ -508,6 +530,21 @@ void dosbox_poll(struct dosbox *b)
 				if (e.buttons & EVB_REL) {	/* the pointer's captured: motion */
 					mouse_motion(b, e.x, e.y, e.buttons & 7);
 					break;
+				}
+				if (!strcmp(d->name, "network") && !d->draws_pointer) {
+					/* our own whole display, across the network */
+					if (b->rcap && !mouse_wants_capture(b))
+						capture(b, 0);
+					if (!b->rcap && e.type == EV_DOWN && mouse_wants_capture(b)) {
+						capture(b, 1);	/* the capturing click isn't a shot */
+						break;
+					}
+					if (b->rcap) {
+						int dx = (e.buttons & EVB_DELTA) ? ev_dx(&e) : 0;
+						int dy = (e.buttons & EVB_DELTA) ? ev_dy(&e) : 0;
+						mouse_motion(b, dx, dy, e.buttons & 7);
+						break;
+					}
 				}
 				if ((e.buttons & EVB_DELTA) && mouse_wants_capture(b)) {
 					/* the whole screen, and a mouse that says how far it

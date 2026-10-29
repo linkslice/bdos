@@ -40,7 +40,7 @@ try:
 
     def text_session():
         m, s = pty.openpty()
-        p = subprocess.Popen([BTERM, "-t", f"127.0.0.1:{PORT}"], stdin=s, stdout=s, stderr=s, cwd=SHARE)
+        p = subprocess.Popen([BTERM, "-c", f"127.0.0.1:{PORT}"], stdin=s, stdout=s, stderr=s, cwd=SHARE)
         os.close(s)
         out = b""
 
@@ -69,7 +69,7 @@ try:
 
         pump(3)
         assert b"Connected to" in out, out
-        run("ver", "bdos version 0.12")
+        run("ver", "bdos version 0.13")
         run("dir T:", "Mine.txt")
         run("type t:\\mine.txt", "this file lives on the host")         # any case
         run('type "T:\\sub dir\\deep.txt"', "deep down")
@@ -84,7 +84,7 @@ try:
         assert "int main" in open(os.path.join(SHARE, "HELLO.C")).read()
         assert os.path.isdir(os.path.join(SHARE, "newdir"))
         assert b"connection closed" in out, out[-300:]
-    check("bterm -t: a shell, T: both ways", text_session)
+    check("bterm -c: a shell, T: both ways", text_session)
 
     def desktop():
         snap = os.path.join(tmp, "desk.ppm")
@@ -151,7 +151,7 @@ try:
         if os.path.exists(wav):
             os.remove(wav)
         env = dict(os.environ, BTERM_NO_SOUND_CARD="1", BTERM_STATS="1")
-        r = bterm("-t", "--audio-out", wav, "--type", "\\\\dosapps\\\\tone\\r", "--type-after", "2",
+        r = bterm("-c", "--audio-out", wav, "--type", "\\\\dosapps\\\\tone\\r", "--type-after", "2",
                   "--quit-after", "9", *extra, f"127.0.0.1:{PORT}", env=env)
         time.sleep(1)
         return r, wav
@@ -173,6 +173,35 @@ try:
         vm.cmd("ver", "bdos version")
     check("bterm: the session's sound plays here", sound)
 
+    def screen():
+        # bterm -t: the machine's screen in a window. The prompt works (and T:),
+        # a DOS game takes the whole window, WIN starts a desktop in it and
+        # Alt+X comes back to the prompt, and EXIT closes the window
+        snap = os.path.abspath(os.path.join(OUTDIR, "screen.ppm"))
+        out = os.path.join(SHARE, "screen.txt")
+        r = bterm("-t", "--type", "ver > T:\\\\screen.txt\\r\\W\\Wcd \\\\dosapps\\rmode13\\r", "--type-after", "2",
+                  "--quit-after", "12", "--snap", snap, f"127.0.0.1:{PORT}", env=SDL_ENV)
+        assert r.returncode == 0, r.stderr.decode()
+        assert "bdos version" in open(out).read()
+        im = Image.open(snap).convert("RGB")
+        assert im.size == (640, 480), im.size
+        colours = len(set(im.getdata()))
+        assert colours > 100, f"MODE13 in the window: {colours} colours"
+        time.sleep(1)
+        r = bterm("-t", "--type", "win\\r\\W\\W\\W", "--type-after", "2", "--quit-after", "11", "--snap", snap,
+                  f"127.0.0.1:{PORT}", env=SDL_ENV)
+        im = Image.open(snap).convert("RGB")
+        teal = sum(1 for p in im.getdata() if p == (0x2F, 0x6F, 0x73))
+        assert teal > 640 * 480 // 20, f"the desktop in the window: {teal} pixels of its colour"
+        time.sleep(1)
+        start = time.time()
+        r = bterm("-t", "--type", "win\\r\\W\\W\\ax\\W\\r\\W\\Wexit\\r", "--type-after", "2", "--quit-after", "40",
+                  f"127.0.0.1:{PORT}", env=SDL_ENV)
+        assert r.returncode == 0 and time.time() - start < 30, f"EXIT after WIN: {time.time() - start:.1f} s"
+        time.sleep(1)
+        vm.cmd("ver", "bdos version")
+    check("bterm -t: the machine's screen in a window", screen)
+
     def bench():
         # a bad network (40 ms each way, 2% lost): a dragged window still
         # catches up quickly, and the updates come squashed
@@ -193,16 +222,16 @@ try:
         r = bterm("-l", f"127.0.0.1:{PORT}")
         assert b"\\\\BDOS-" in r.stdout, r.stdout
         vm.cmd("control net.password=swordfish", "swordfish")
-        r = bterm("-t", "-n", "--quit-after", "3", f"127.0.0.1:{PORT}")
+        r = bterm("-c", "-n", "--quit-after", "3", f"127.0.0.1:{PORT}")
         assert r.returncode == 1 and b"wants a password" in r.stderr, r.stderr
-        r = bterm("-t", "-n", "-p", "wrong", "--quit-after", "3", f"127.0.0.1:{PORT}")
+        r = bterm("-c", "-n", "-p", "wrong", "--quit-after", "3", f"127.0.0.1:{PORT}")
         assert r.returncode == 1 and b"password was wrong" in r.stderr, r.stderr
-        r = bterm("-t", "-n", "-p", "swordfish", "--type", "ver\\r", "--type-after", "1",
+        r = bterm("-c", "-n", "-p", "swordfish", "--type", "ver\\r", "--type-after", "1",
                   "--quit-after", "4", f"127.0.0.1:{PORT}")
         assert r.returncode == 0 and b"bdos version" in r.stdout, r.stdout[-300:]
         vm.cmd("control net.password=")
         vm.cmd("control net.udp=0")
-        r = bterm("-t", "-n", "--quit-after", "3", f"127.0.0.1:{PORT}")
+        r = bterm("-c", "-n", "--quit-after", "3", f"127.0.0.1:{PORT}")
         assert r.returncode == 1 and b"no answer" in r.stderr, r.stderr
         vm.cmd("control net.udp=1")
     check("bterm -l, net.password, net.udp", list_and_password)

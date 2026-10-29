@@ -26,7 +26,7 @@ exec(src.split("# ---- the tests")[0])     # VM, check(), suite(); `disk` is a c
 
 def live_shell(vm):
     """The live CD starts the desktop by itself: a shell from Alt+N"""
-    vm.wait_for("bdos 0.12", 120)
+    vm.wait_for("bdos 0.13", 120)
     time.sleep(6)
     start = len(vm.log)
     vm.keys("alt-n")
@@ -60,7 +60,7 @@ if suite("cli"):
         def installed():
             live_shell(vm)                # it starts the desktop, as asked
             vm.cmd("drives", "disk0 partition 2")
-            vm.cmd("ver", "bdos version 0.12")
+            vm.cmd("ver", "bdos version 0.13")
             vm.cmd("hostname", "LIVEBOX")
             vm.cmd("control list", "net.ntp=time.example")
             vm.cmd("dir \\bdos\\live.txt", absent="LIVE.TXT")
@@ -190,7 +190,7 @@ if suite("proxmox"):
         def pve_boot():
             live_shell(vm)
             vm.cmd("drives", "sda partition 2")
-            vm.cmd("ver", "bdos version 0.12")
+            vm.cmd("ver", "bdos version 0.13")
             vm.cmd("echo on scsi > \\scsi.txt")
             vm.cmd("type \\scsi.txt", "on scsi")
             vm.cmd("libctest", "libctest: all passed", timeout=60)

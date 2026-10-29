@@ -37,7 +37,7 @@ int net_resolve(const char *name, uint8_t mac[6]);
 void net_view(int ms, void (*cb)(const char *name, const uint8_t mac[6], void *arg), void *arg);
 
 /* connections carry messages: [u32 length][u8 type][payload] */
-enum { SVC_TTY = 'T', SVC_DESK = 'D', SVC_FILE = 'F' };
+enum { SVC_TTY = 'T', SVC_DESK = 'D', SVC_FILE = 'F', SVC_SCREEN = 'S' };	/* S: bterm -t's screen */
 
 struct netmsg {
 	struct netmsg *next;

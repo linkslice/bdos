@@ -650,8 +650,8 @@ int console_is_remote(struct console *c)
 int remote_session_desktop(struct console *c)
 {
 	(void)c;
-	kprintf("This is a text session. Use WIN \\\\%s from your own machine for the desktop.\n",
-	    net_hostname());
+	kprintf("This is a text session: bterm -t %s gives you this machine's screen, where WIN works\n"
+	    "(or plain bterm for its desktop, or WIN \\\\%s from another bdos).\n", net_hostname(), net_hostname());
 	return 1;
 }
 
@@ -979,30 +979,26 @@ static void rd_pointer(struct display *d, int shape)
 		conn_send(rd->c, M_PTR, &v, sizeof v);
 }
 
-static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
+/* a display that's a bterm window: drawing operations if it draws for itself, else pixels */
+static struct rdisp *rd_new(struct conn *c, const struct hello *h, int w, int ht)
 {
-	struct hello h;
-	memset(&h, 0, sizeof h);
-	memcpy(&h, hello_raw, MIN(hlen, sizeof h));
-	int w = MAX(320, MIN(h.w, 1600)), ht = MAX(200, MIN(h.h, 1200));
 	struct rdisp *rd = kzalloc(sizeof *rd);
 	if (!rd || surf_init(&rd->surf, w, ht)) {
 		kfree(rd);
-		conn_close(c);
-		return;
+		return NULL;
 	}
 	rd->c = c;
 	rd->d.surf = &rd->surf;
 	rd->d.flush = rd_flush;
 	rd->d.next_event = rd_event;
 	rd->d.alive = 1;
-	rd->d.draws_pointer = (h.flags & HELLO_POINTER) != 0;
-	if (h.flags & HELLO_LZ) {
+	rd->d.draws_pointer = (h->flags & HELLO_POINTER) != 0;
+	if (h->flags & HELLO_LZ) {
 		rd->ztab = kmalloc(sizeof(uint32_t) * LZ_TABLE_WORDS);
 		rd->zbuf = kmalloc(lz_bound(16 + 6 * PIX_MAX_RUNS));
 		rd->lz = rd->ztab && rd->zbuf;
 	}
-	if ((h.flags & HELLO_DRAW) && rd->lz) {
+	if ((h->flags & HELLO_DRAW) && rd->lz) {
 		rd->draw = 1;
 		rd->rec.emit = rd_emit;
 		rd->d.rec = &rd->rec;
@@ -1013,7 +1009,37 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	rd->d.commit = rd_commit;
 	rd->d.busy = rd_busy;
 	rd->d.name = "network";
+	return rd;
+}
 
+static void rd_free(struct rdisp *rd)
+{
+	surf_free(&rd->surf);
+	kfree(rd->ztab);
+	kfree(rd->zbuf);
+	kfree(rd->ops);
+	rd_commit(&rd->d);
+	kfree(rd->outq);
+	kfree(rd);
+}
+
+/*
+ * bterm's window: a desktop (bterm), or (bterm -t) a screen -- the text
+ * console, as if you were at the machine, where DOS games take the whole
+ * window and WIN starts a desktop in it. Either way the session has T:
+ * and its own sound.
+ */
+static void window_service(struct conn *c, const uint8_t *hello_raw, size_t hlen, int screen)
+{
+	struct hello h;
+	memset(&h, 0, sizeof h);
+	memcpy(&h, hello_raw, MIN(hlen, sizeof h));
+	int w = MAX(320, MIN(h.w, 1600)), ht = MAX(200, MIN(h.h, 1200));
+	struct rdisp *rd = rd_new(c, &h, w, ht);
+	if (!rd) {
+		conn_close(c);
+		return;
+	}
 	struct task *t = task_current();
 	struct rfs *tdr = NULL;
 	if (h.flags & HELLO_SHARE) {
@@ -1027,22 +1053,42 @@ static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
 	snprintf(who, sizeof who, "\\\\%s", h.host[0] ? h.host : conn_peer(c));
 	struct netaudio *na;
 	int asess = session_audio_start(c, h.flags, who, &na);
-	char title[64];
-	snprintf(title, sizeof title, "Program Manager on \\\\%s", net_hostname());
-	desktop_run_on(&rd->d, title);
+	if (screen) {
+		extern struct console *scon_new(struct display *d, const char *name);
+		extern void scon_free(struct console *c);
+		struct console *sc = scon_new(&rd->d, "SCREEN (remote)");
+		if (sc) {
+			t->con = sc;
+			sc->refs++;
+			kprintf("Connected to \\\\%s (%s %s, %d core%s). T: is %s on \\\\%s. EXIT to disconnect.\n\n",
+			    net_hostname(), BDOS_NAME, BDOS_VERSION, ncpus, ncpus == 1 ? "" : "s",
+			    h.share[0] ? h.share : "nothing", h.host);
+			shell_task(NULL);
+			t->con = NULL;
+			scon_free(sc);
+		}
+	} else {
+		char title[64];
+		snprintf(title, sizeof title, "Program Manager on \\\\%s", net_hostname());
+		desktop_run_on(&rd->d, title);
+	}
 	session_audio_end(asess, na);
 	conn_send(c, M_BYE, NULL, 0);
 	t->tdrive = NULL;
 	conn_close(c);
 	if (tdr)
 		rfs_free(tdr);
-	surf_free(&rd->surf);
-	kfree(rd->ztab);
-	kfree(rd->zbuf);
-	kfree(rd->ops);
-	rd_commit(&rd->d);
-	kfree(rd->outq);
-	kfree(rd);
+	rd_free(rd);
+}
+
+static void desk_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
+{
+	window_service(c, hello_raw, hlen, 0);
+}
+
+static void screen_service(struct conn *c, const uint8_t *hello_raw, size_t hlen)
+{
+	window_service(c, hello_raw, hlen, 1);
 }
 
 /* ---- server: NET USE file service ------------------------------------------------------ */
@@ -1368,5 +1414,6 @@ void remote_init(void)
 {
 	net_service(SVC_TTY, tty_service);
 	net_service(SVC_DESK, desk_service);
+	net_service(SVC_SCREEN, screen_service);
 	net_service(SVC_FILE, file_service);
 }
